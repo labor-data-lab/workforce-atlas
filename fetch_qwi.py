@@ -130,8 +130,9 @@ def main():
         sys.exit("Could not find recent QWI data.")
     print("Newest quarter:", latest)
 
-    # 2. State totals and sectors, last 12 quarters
-    quarters = [tshift(latest, -i) for i in range(11, -1, -1)]
+    # 2. State totals and sectors for the last NQ quarters (index.html reads NQ from data.js)
+    NQ = 40  # 10 years
+    quarters = [tshift(latest, -i) for i in range(NQ - 1, -1, -1)]
     by_year = {}
     for t in quarters:
         y, q = tparse(t)
@@ -181,6 +182,19 @@ def main():
             ex = [] if ind == "00" else [("industry", ind)]
             jobs.append(("sa", bp(DEMO_VARS, "state:" + s, y, [q], sexs + [("agegrp", a) for a in AGES] + ex)))
             jobs.append(("se", bp(DEMO_VARS, "state:" + s, y, [q], sexs + [("education", e) for e in EDUS] + ex)))
+    # 4b. Yearly views (all industries): pay by sex/education and "Who works here" for every saved year.
+    #     Quarter lists follow index.html: each year's quarters up to the newest.
+    for yy in sorted(by_year):
+        qs = [x for x in (1, 2, 3, 4) if tq(yy, x) <= latest]
+        jobs.append(("_all_sex", (yy, qs)))
+        for s in STATES:
+            jobs.append(("sa", bp(DEMO_VARS, "state:" + s, yy, qs, sexs + [("agegrp", a) for a in AGES])))
+            jobs.append(("se", bp(DEMO_VARS, "state:" + s, yy, qs, sexs + [("education", e) for e in EDUS])))
+    yearly = [j for j in jobs if j[0] == "_all_sex"]
+    jobs = [j for j in jobs if j[0] != "_all_sex"]
+    for _, (yy, qs) in yearly:
+        per_state("sa", "EarnS,EmpS", yy, qs, [("sex", "1"), ("sex", "2")])
+        per_state("se", "EarnS,EmpS", yy, qs, [("education", "E2"), ("education", "E4")])
     print(f"Loading demographic detail ({len(jobs)} requests)...")
     done = 0
     with ThreadPoolExecutor(max_workers=6) as ex:
@@ -189,7 +203,7 @@ def main():
             if done % 100 == 0:
                 print(f"  {done}/{len(jobs)}")
 
-    meta = {"latest": latest, "fetched": dt.date.today().isoformat()}
+    meta = {"latest": latest, "nq": NQ, "fetched": dt.date.today().isoformat()}
 
     # 5. Optional: county totals and sectors, one file per state in counties/ (loaded when a state is opened)
     if with_counties:
@@ -197,7 +211,8 @@ def main():
         os.makedirs(cdir, exist_ok=True)
         for s in STATES:
             part = {}
-            for y in sorted(by_year):
+            # counties: the 3 newest years only, to keep each state's file small
+            for y in [yy for yy in sorted(by_year) if yy >= int(latest[:4]) - 2]:
                 for extra in ([], inds):
                     p = bp(VARS, "county:*&in=state:" + s, y, by_year[y], extra)
                     t = api("sa", p, key)

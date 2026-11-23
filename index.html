@@ -386,7 +386,9 @@ async function loadAll(){
   try{
     progN=0;progD=12;
     S.tLatest=await findLatest();progN=2;
-    S.quarters=[];for(let i=11;i>=0;i--)S.quarters.push(tshift(S.tLatest,-i));
+    // the saved data file can hold more history (fetch_qwi.py sets nq); live mode loads 3 years
+    const NQ=OFFLINE&&window.QWI_META.nq?window.QWI_META.nq:12;
+    S.quarters=[];for(let i=NQ-1;i>=0;i--)S.quarters.push(tshift(S.tLatest,-i));
     const byYear={};S.quarters.forEach(t=>{const [y,q]=tparse(t);(byYear[y]??=[]).push(q);});
     const ys=Object.keys(byYear).sort();
     if(!OFFLINE)loadSaved(S.tLatest);
@@ -444,7 +446,8 @@ async function selectQuarter(t){
   const need=[];if(isA(t))need.push(...qsOf(tshift(t,-4)),...qsOf(t));else for(let k=7;k>=0;k--)need.push(tshift(t,-k));
   const missing=need.some(x=>!S.quarters.includes(x))||!S.demoAllT[t];
   if(missing){
-    if(!KEY){S.sel=t;render();return;}
+    // no key: use whatever the saved data file has for this period
+    if(!KEY){ACACHE.clear();try{await loadDemoAll(t,()=>{});}catch(e){}S.sel=t;render();return;}
     V.innerHTML=`<div class="loading"><h2>Loading ${tlab(t)}</h2><div class="prog"><b id="progbar"></b></div><p class="lede" id="progmsg" style="margin:0 auto">Fetching earlier quarters from the Census API…</p></div>`;
     ACACHE.clear();
     try{const tick=await loadQuarters(need)||(()=>{progN++;prog();});await loadDemoAll(t,tick);saveTables();}
