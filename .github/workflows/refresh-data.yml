@@ -1,0 +1,108 @@
+# Refreshes Workforce Atlas data from the Census Bureau, BLS, BEA and LEHD, then publishes the site.
+# Runs on the 2nd of every month, whenever you change files on the main branch, and on demand
+# (Actions tab > "Refresh data and publish" > Run workflow).
+# Your API keys live in Settings > Secrets and variables > Actions; they are never shown or published.
+
+name: Refresh data and publish
+
+on:
+  schedule:
+    - cron: "17 9 2 * *"        # 09:17 UTC on the 2nd of each month
+  workflow_dispatch:
+    inputs:
+      refresh:
+        description: "Download fresh data (uncheck to only republish the site)"
+        type: boolean
+        default: true
+      county_flows:
+        description: "Also rebuild county-to-county commuting (about 1 GB, 20-60 minutes)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.refresh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
+      BEA_API_KEY: ${{ secrets.BEA_API_KEY }}
+      BLS_API_KEY: ${{ secrets.BLS_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the Census key is set
+        run: |
+          if [ -z "$CENSUS_API_KEY" ]; then
+            echo "::error::Add a CENSUS_API_KEY secret under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Download jobs data (QWI, states and counties)
+        run: python fetch_qwi.py --counties
+
+      - name: Download context data (ACS, BLS, BEA, LEHD)
+        run: |
+          FLAGS=""
+          # county commuting changes yearly: rebuild it in January, or when asked
+          if [ "$(date +%m)" = "01" ] || [ "${{ inputs.county_flows }}" = "true" ]; then FLAGS="--county-flows"; fi
+          # keep the previous county commuting if this run doesn't rebuild it
+          python fetch_context.py $FLAGS
+          if [ -z "$FLAGS" ] && git show HEAD:context.js > /tmp/old_context.js 2>/dev/null; then
+            python - <<'PY'
+          import json
+          def load(p):
+              s = open(p, encoding="utf-8").read()
+              return json.loads(s[s.index("=") + 1:s.rstrip().rindex(";")])
+          new, old = load("context.js"), load("/tmp/old_context.js")
+          if "lodesC" not in new and "lodesC" in old:
+              new["lodesC"] = old["lodesC"]
+              open("context.js", "w", encoding="utf-8").write("window.CTX=" + json.dumps(new, separators=(",", ":")) + ";\n")
+              print("Kept county commuting from the previous run")
+          PY
+          fi
+
+      - name: Save the new data to the repository
+        run: |
+          git config user.name "workforce-atlas-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data.js context.js counties
+          if git diff --cached --quiet; then echo "No changes"; else git commit -m "Refresh data $(date +%Y-%m-%d)" && git push; fi
+
+  deploy:
+    needs: refresh
+    if: always() && (needs.refresh.result == 'success' || needs.refresh.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Choose the files to publish (never the scripts or settings)
+        run: |
+          mkdir _site
+          cp index.html _site/
+          for f in data.js context.js; do [ -f "$f" ] && cp "$f" _site/ || true; done
+          [ -d counties ] && cp -r counties _site/ || true
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
