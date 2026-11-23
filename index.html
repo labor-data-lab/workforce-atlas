@@ -292,6 +292,7 @@ async function api(ds,params){
   if(MEM[k])return MEM[k];
   let table=null;
   if(window.QWI_CACHE&&k in window.QWI_CACHE) table=window.QWI_CACHE[k];
+  else if(window.QWI_CACHE&&(table=fromSaved(k))){}
   else{
     if(!KEY){ if(OFFLINE) return []; throw new KeyError("Add a Census API key to load data."); }
     let r;
@@ -333,6 +334,24 @@ async function apiStates(ds,get,y,qs,extra,onEach){
 const LS_KEY="qwiCacheV1";
 function loadSaved(tLatest){try{const o=JSON.parse(localStorage.getItem(LS_KEY)||"null");if(o&&o.tLatest===tLatest&&Date.now()-o.saved<7*864e5){Object.assign(window.QWI_CACHE??={},o.tables);return true;}}catch(e){}return false;}
 function saveTables(){try{const t={};for(const k in RAW)if(!k.includes("county:"))t[k]=RAW[k];localStorage.setItem(LS_KEY,JSON.stringify({tLatest:S.tLatest,saved:Date.now(),tables:t}));}catch(e){}}
+
+// Saved tables are keyed by their exact query. A request for some of a saved table's quarters is answered from it.
+const SIG={},SIGSEEN=new Set();
+const sigOf=k=>k.replace(/&quarter=\d/g,""),qsOfKey=k=>[...k.matchAll(/&quarter=(\d)/g)].map(m=>m[1]);
+function indexSaved(){for(const k in (window.QWI_CACHE||{}))if(!SIGSEEN.has(k)){SIGSEEN.add(k);(SIG[sigOf(k)]??=[]).push(k);}}
+function fromSaved(k){
+  indexSaved();const want=qsOfKey(k);
+  // the saved table covering the most requested quarters (the oldest saved year may be partial)
+  let c=null,best=0;for(const x of (SIG[sigOf(k)]||[])){const have=qsOfKey(x);const n=want.filter(q=>have.includes(q)).length;if(n>best){best=n;c=x;}}
+  if(!c||(KEY&&best<want.length))return null; // with a key, fetch live rather than use a partial saved table
+  const t=window.QWI_CACHE[c];if(!Array.isArray(t)||t.length<2)return t||[];
+  const qi=t[0].indexOf("quarter");return qi<0?t:[t[0],...t.slice(1).filter(r=>want.includes(String(r[qi])))];
+}
+const HIST=new Set();
+async function loadHistory(years){
+  if(!OFFLINE||!window.QWI_META.first)return;
+  for(const y of years){if(HIST.has(y)||y<window.QWI_META.first||y>=window.QWI_META.split)continue;HIST.add(y);await loadScript(`history/${y}.js`);}
+}
 
 /* ---------- Loading ---------- */
 let progN=0,progD=1;
@@ -386,9 +405,8 @@ async function loadAll(){
   try{
     progN=0;progD=12;
     S.tLatest=await findLatest();progN=2;
-    // the saved data file can hold more history (fetch_qwi.py sets nq); live mode loads 3 years
-    const NQ=OFFLINE&&window.QWI_META.nq?window.QWI_META.nq:12;
-    S.quarters=[];for(let i=NQ-1;i>=0;i--)S.quarters.push(tshift(S.tLatest,-i));
+    // start with the newest 3 years; older years load when someone picks them (saved history/YYYY.js or live)
+    S.quarters=[];for(let i=11;i>=0;i--)S.quarters.push(tshift(S.tLatest,-i));
     const byYear={};S.quarters.forEach(t=>{const [y,q]=tparse(t);(byYear[y]??=[]).push(q);});
     const ys=Object.keys(byYear).sort();
     if(!OFFLINE)loadSaved(S.tLatest);
@@ -447,7 +465,8 @@ async function selectQuarter(t){
   const missing=need.some(x=>!S.quarters.includes(x))||!S.demoAllT[t];
   if(missing){
     // no key: use whatever the saved data file has for this period
-    if(!KEY){ACACHE.clear();try{await loadDemoAll(t,()=>{});}catch(e){}S.sel=t;render();return;}
+    if(!KEY){ACACHE.clear();V.innerHTML=`<div class="loading"><h2>Loading ${tlab(t)}</h2><div class="prog"><b id="progbar"></b></div><p class="lede" id="progmsg" style="margin:0 auto">Opening saved data…</p></div>`;
+      try{await loadHistory([...new Set(need.map(x=>+x.slice(0,4)))]);await loadQuarters(need);await loadDemoAll(t,()=>{});}catch(e){}S.sel=t;render();return;}
     V.innerHTML=`<div class="loading"><h2>Loading ${tlab(t)}</h2><div class="prog"><b id="progbar"></b></div><p class="lede" id="progmsg" style="margin:0 auto">Fetching earlier quarters from the Census API…</p></div>`;
     ACACHE.clear();
     try{const tick=await loadQuarters(need)||(()=>{progN++;prog();});await loadDemoAll(t,tick);saveTables();}
@@ -457,7 +476,7 @@ async function selectQuarter(t){
 }
 function fillQuarterPicker(){
   const sel=document.getElementById("qsel");if(!sel)return;
-  const opts=[];let t=S.tLatest;const stop=(OFFLINE&&!KEY)?S.quarters[0]:"2000-Q1";
+  const opts=[];let t=S.tLatest;const stop=(OFFLINE&&!KEY)?(window.QWI_META.first?window.QWI_META.first+"-Q1":S.quarters[0]):"2000-Q1";
   while(t>=stop){opts.push(t);t=tshift(t,-1);}
   const yrs=[];for(let y=+S.tLatest.slice(0,4);y>=+stop.slice(0,4);y--)yrs.push(y+"-A");
   sel.innerHTML=`<option value="">Newest available</option><optgroup label="Years (average of the year’s quarters)">${yrs.map(x=>`<option value="${x}"${x===S.sel?" selected":""}>${x.slice(0,4)}</option>`).join("")}</optgroup><optgroup label="Quarters">`+opts.map(x=>`<option value="${x}"${x===S.sel?" selected":""}>${tlab(x)}</option>`).join("")+`</optgroup>`;
@@ -1061,7 +1080,9 @@ function viewSetup(){
   document.getElementById("keyform").onsubmit=async ev=>{ev.preventDefault();const nb=document.getElementById("beain").value.trim();const nk=document.getElementById("keyin").value.trim();
     if(nb!==BEA_KEY){BEA_KEY=nb;try{localStorage.setItem("beaKey",BEA_KEY);localStorage.removeItem("beaV1");}catch(e){}if(CTX.bea?.live)delete CTX.bea;}
     if(nk===KEY&&S.ready){await loadBEA();if(BEA_ERR)viewSetup();else location.hash="#home";return;}
-    KEY=nk;try{localStorage.setItem("qwiKey",KEY);}catch(e){}S.err=null;Object.keys(MEM).forEach(k=>delete MEM[k]);updateKeyBtn();if(location.hash==="#setup")location.hash="#home";else{S.ready=false;loadAll();}};
+    KEY=nk;try{localStorage.setItem("qwiKey",KEY);}catch(e){}
+    // a new key switches the site to live mode: rebuild the period menu and look up industry and county names again
+    SUBLIST=null;CNAMES=null;if(S.ready){fillQuarterPicker();loadIndustryList();loadCountyNames();}S.err=null;Object.keys(MEM).forEach(k=>delete MEM[k]);updateKeyBtn();if(location.hash==="#setup")location.hash="#home";else{S.ready=false;loadAll();}};
   const c=document.getElementById("keyclear");if(c)c.onclick=()=>{KEY="";try{localStorage.removeItem("qwiKey");}catch(e){}updateKeyBtn();viewSetup();};
 }
 const QUESTIONS=[["ur","Where is unemployment highest?"],["realEarn","Where does a paycheck go furthest?"],["jor","Where are the most job openings?"],["empYoY","Where are jobs growing fastest?"],["earn","Where does work pay the most?"],["hireRate","Where is hiring strongest?"],["turn","Where do workers change jobs most?"],["gap","Where is the gender pay gap widest?"],["eduPrem","Where does a degree pay off most?"]];

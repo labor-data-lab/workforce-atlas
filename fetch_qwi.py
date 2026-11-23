@@ -131,7 +131,7 @@ def main():
     print("Newest quarter:", latest)
 
     # 2. State totals and sectors for the last NQ quarters (index.html reads NQ from data.js)
-    NQ = 40  # 10 years
+    NQ = 80  # 20 years
     quarters = [tshift(latest, -i) for i in range(NQ - 1, -1, -1)]
     by_year = {}
     for t in quarters:
@@ -203,7 +203,8 @@ def main():
             if done % 100 == 0:
                 print(f"  {done}/{len(jobs)}")
 
-    meta = {"latest": latest, "nq": NQ, "fetched": dt.date.today().isoformat()}
+    split = int(tshift(latest, -11)[:4])  # data.js holds the years index.html opens with; older years go to history/YYYY.js
+    meta = {"latest": latest, "first": min(by_year), "split": split, "fetched": dt.date.today().isoformat()}
 
     # 5. Optional: county totals and sectors, one file per state in counties/ (loaded when a state is opened)
     if with_counties:
@@ -221,7 +222,20 @@ def main():
             with open(os.path.join(cdir, s + ".js"), "w", encoding="utf-8") as f:
                 f.write("Object.assign(window.QWI_CACHE=window.QWI_CACHE||{}," + json.dumps(part, separators=(",", ":")) + ");\n")
             print(f"  counties/{s}.js: {sum(max(0, len(t) - 1) for t in part.values()):,} rows")
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.js")
+    import re
+    here = os.path.dirname(os.path.abspath(__file__))
+    hist = {}
+    for k in list(CACHE):
+        m = re.search(r"&year=(\d{4})", k)
+        if m and int(m.group(1)) < split:
+            hist.setdefault(int(m.group(1)), {})[k] = CACHE.pop(k)
+    hdir = os.path.join(here, "history")
+    os.makedirs(hdir, exist_ok=True)
+    for yy, part in sorted(hist.items()):
+        with open(os.path.join(hdir, f"{yy}.js"), "w", encoding="utf-8") as f:
+            f.write("Object.assign(window.QWI_CACHE=window.QWI_CACHE||{}," + json.dumps(part, separators=(",", ":")) + ");\n")
+    print(f"Saved {len(hist)} history files ({min(hist) if hist else '-'}-{max(hist) if hist else '-'}) in {hdir}")
+    out = os.path.join(here, "data.js")
     with open(out, "w", encoding="utf-8") as f:
         f.write("window.QWI_META=" + json.dumps(meta) + ";\n")
         f.write("window.QWI_CACHE=" + json.dumps(CACHE, separators=(",", ":")) + ";\n")
