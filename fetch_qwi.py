@@ -32,6 +32,9 @@ STATES = ["01", "02", "04", "05", "06", "08", "09", "10", "11", "12", "13", "15"
           "47", "48", "49", "50", "51", "53", "54", "55", "56"]
 AGES = ["A00", "A01", "A02", "A03", "A04", "A05", "A06", "A07", "A08"]
 EDUS = ["E0", "E1", "E2", "E3", "E4", "E5"]
+RACES = ["A0", "A1", "A2", "A3", "A4", "A5", "A7"]   # all, White, Black, AIAN, Asian, NHPI, two or more (A6 unused)
+ETHS = ["A0", "A1", "A2"]                           # all, not Hispanic, Hispanic
+RH = [("race", r) for r in RACES] + [("ethnicity", e) for e in ETHS]
 
 CACHE = {}
 
@@ -182,6 +185,7 @@ def main():
             ex = [] if ind == "00" else [("industry", ind)]
             jobs.append(("sa", bp(DEMO_VARS, "state:" + s, y, [q], sexs + [("agegrp", a) for a in AGES] + ex)))
             jobs.append(("se", bp(DEMO_VARS, "state:" + s, y, [q], sexs + [("education", e) for e in EDUS] + ex)))
+            jobs.append(("rh", bp(DEMO_VARS, "state:" + s, y, [q], RH + ex)))
     # 4b. Yearly views (all industries): pay by sex/education and "Who works here" for every saved year.
     #     Quarter lists follow index.html: each year's quarters up to the newest.
     for yy in sorted(by_year):
@@ -190,6 +194,7 @@ def main():
         for s in STATES:
             jobs.append(("sa", bp(DEMO_VARS, "state:" + s, yy, qs, sexs + [("agegrp", a) for a in AGES])))
             jobs.append(("se", bp(DEMO_VARS, "state:" + s, yy, qs, sexs + [("education", e) for e in EDUS])))
+            jobs.append(("rh", bp(DEMO_VARS, "state:" + s, yy, qs, RH)))
     yearly = [j for j in jobs if j[0] == "_all_sex"]
     jobs = [j for j in jobs if j[0] != "_all_sex"]
     for _, (yy, qs) in yearly:

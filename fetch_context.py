@@ -323,6 +323,22 @@ def fetch_lodes_counties(year):
     return {"year": year, "counties": out}
 
 
+# Worker profile columns kept from LODES WAC/RAC files (age, earnings, industry, race, ethnicity, education, sex)
+LCOLS = (["C000", "CA01", "CA02", "CA03", "CE01", "CE02", "CE03"] + [f"CNS{i:02d}" for i in range(1, 21)] +
+         ["CR01", "CR02", "CR03", "CR04", "CR05", "CR07", "CT01", "CT02", "CD01", "CD02", "CD03", "CD04", "CS01", "CS02"])
+DETAILS = {}  # written to details.js (loaded by the site only when a page needs it)
+
+
+def lodes_profile(rows, geo_col, into):
+    for r in rows:
+        g = r[geo_col][:5]
+        acc = into.setdefault(g, [0] * len(LCOLS))
+        for i, c in enumerate(LCOLS):
+            v = r.get(c)
+            if v:
+                acc[i] += int(v)
+
+
 def fetch_lodes():
     year = None
     for y in range(dt.date.today().year - 1, dt.date.today().year - 8, -1):
@@ -337,9 +353,17 @@ def fetch_lodes():
         return None
     print(f"LODES {year}: downloading commuting files for each state...")
     jobs, inc, flows = {}, {}, {}  # flows[(home, work)] = workers
+    wac, rac = {}, {}
     for f, ab in STATES.items():
         try:
-            jobs[f] = sum(int(r["C000"]) for r in gz_csv(f"{LODES}{ab}/wac/{ab}_wac_S000_JT00_{year}.csv.gz"))
+            part = {}
+            lodes_profile(gz_csv(f"{LODES}{ab}/wac/{ab}_wac_S000_JT00_{year}.csv.gz"), "w_geocode", part)
+            wac.update(part)
+            jobs[f] = sum(v[0] for v in part.values())
+            try:
+                lodes_profile(gz_csv(f"{LODES}{ab}/rac/{ab}_rac_S000_JT00_{year}.csv.gz"), "h_geocode", rac)
+            except Exception as e:
+                print(f"  {ab}: residence profile skipped ({e})")
             n = 0
             for r in gz_csv(f"{LODES}{ab}/od/{ab}_od_aux_JT00_{year}.csv.gz"):
                 h = r["h_geocode"][:2]
@@ -356,7 +380,63 @@ def fetch_lodes():
         to = sorted(((w, c) for (h, w), c in flows.items() if h == f), key=lambda x: -x[1])
         st[f] = {"jobs": jobs[f], "inc": inc[f], "out": sum(c for _, c in to),
                  "from": [[h, c] for h, c in frm[:6]], "to": [[w, c] for w, c in to[:6]]}
+    sum_by_state = lambda d: {f: [sum(v[i] for g, v in d.items() if g[:2] == f) for i in range(len(LCOLS))] for f in STATES if any(g[:2] == f for g in d)}
+    DETAILS["lodesW"] = {"year": year, "cols": LCOLS, "wac": wac, "rac": rac, "wacS": sum_by_state(wac), "racS": sum_by_state(rac)}
+    print(f"LODES worker profiles {year}: {len(wac)} counties (work), {len(rac)} counties (home)")
     return {"year": year, "states": st}
+
+
+# ---------------- BLS QCEW: employers, jobs and pay by industry ----------------
+QCEW_IND = ["10", "11", "21", "22", "23", "31-33", "42", "44-45", "48-49", "51", "52", "53", "54", "55", "56",
+            "61", "62", "71", "72", "81"]
+
+
+def fetch_qcew(contact):
+    """Private-sector establishments, jobs and average annual pay by county and state, annual averages."""
+    ua = dict(UA)
+    if contact:
+        ua["User-Agent"] = f"WorkforceAtlas/1.0 (contact: {contact})"
+    def csv_rows(url):
+        req = urllib.request.Request(url, headers=ua)
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return list(csv.DictReader(io.TextIOWrapper(r, encoding="utf-8")))
+    year = None
+    for y in range(dt.date.today().year - 1, dt.date.today().year - 4, -1):
+        try:
+            rows10 = csv_rows(f"https://data.bls.gov/cew/data/api/{y}/a/industry/10.csv")
+            if rows10:
+                year = y
+                break
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                print("QCEW: BLS refused the download. Add --contact you@example.com (BLS asks scripts to identify themselves).")
+                return None
+            continue
+    if not year:
+        print("QCEW: no annual data found")
+        return None
+    counties, states = {}, {}
+    def take(rows, code):
+        for r in rows:
+            if r.get("own_code") != "5" or r.get("industry_code", "").replace("_", "-") != code:
+                continue
+            a = r.get("area_fips", "")
+            if len(a) != 5 or not a.isdigit() or a[:2] not in STATES:
+                continue
+            if r.get("disclosure_code") == "N":
+                vals = [None, None, None]
+            else:
+                vals = [num(r.get("annual_avg_estabs")), num(r.get("annual_avg_emplvl")), num(r.get("avg_annual_pay"))]
+            (states if a.endswith("000") else counties).setdefault(a[:2] if a.endswith("000") else a, {})[code] = vals
+    take(rows10, "10")
+    for code in QCEW_IND[1:]:
+        try:
+            take(csv_rows(f"https://data.bls.gov/cew/data/api/{year}/a/industry/{code.replace('-', '_')}.csv"), code)
+        except Exception as e:
+            print(f"  QCEW {code}: skipped ({e})")
+    DETAILS["qcew"] = {"year": year, "cols": ["estabs", "jobs", "avgPay"], "counties": counties, "states": states}
+    print(f"QCEW {year}: {len(counties)} counties, {len(states)} states")
+    return {"year": year}
 
 
 def main():
@@ -365,6 +445,7 @@ def main():
     ap.add_argument("--bea", default=os.environ.get("BEA_API_KEY", ""))
     ap.add_argument("--bls", default=os.environ.get("BLS_API_KEY", ""))
     ap.add_argument("--skip-lodes", action="store_true")
+    ap.add_argument("--contact", default=os.environ.get("BLS_CONTACT", ""), help="your email, sent to BLS when downloading QCEW files")
     ap.add_argument("--county-flows", action="store_true", help="also download county-to-county commuting (about 1 GB, 20-60 minutes)")
     a = ap.parse_args()
     ctx = {"fetched": dt.date.today().isoformat()}
@@ -373,7 +454,8 @@ def main():
              ("bls", lambda: fetch_bls(a.bls)),
              ("bea", lambda: fetch_bea(a.bea) if a.bea else print("BEA: skipped (no --bea key)")),
              ("blsC", lambda: fetch_bls_counties(a.bls, list(ctx.get("acs5", {}).get("counties", {})))),
-             ("lodes", lambda: None if a.skip_lodes else fetch_lodes())]
+             ("lodes", lambda: None if a.skip_lodes else fetch_lodes()),
+             ("qcew", lambda: fetch_qcew(a.contact))]
     if a.county_flows and not a.skip_lodes:
         steps.append(("lodesC", lambda: fetch_lodes_counties(ctx["lodes"]["year"]) if "lodes" in ctx else print("LODES counties: skipped (state files failed)")))
     for name, fn in steps:
@@ -387,6 +469,10 @@ def main():
     with open(out, "w", encoding="utf-8") as fh:
         fh.write("window.CTX=" + json.dumps(ctx, separators=(",", ":")) + ";\n")
     print("Saved", out, "with:", ", ".join(k for k in ctx if k != "fetched") or "nothing")
+    det = os.path.join(os.path.dirname(os.path.abspath(__file__)), "details.js")
+    with open(det, "w", encoding="utf-8") as fh:
+        fh.write("window.CTX2=" + json.dumps(dict(DETAILS, fetched=ctx["fetched"]), separators=(",", ":")) + ";\n")
+    print("Saved", det, "with:", ", ".join(DETAILS) or "nothing", f"({os.path.getsize(det) / 1e6:.1f} MB)")
 
 
 if __name__ == "__main__":

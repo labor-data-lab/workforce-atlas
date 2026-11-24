@@ -214,6 +214,9 @@ const SECTORS=[
 const IND={"00":"All industries"}; SECTORS.forEach(([c,n])=>IND[c]=n);
 const IND_CODES=SECTORS.map(s=>s[0]);
 const AGES=[["A01","14–18"],["A02","19–21"],["A03","22–24"],["A04","25–34"],["A05","35–44"],["A06","45–54"],["A07","55–64"],["A08","65+"]];
+const RACES=[["A1","White"],["A2","Black"],["A3","American Indian or Alaska Native"],["A4","Asian"],["A5","Native Hawaiian or Pacific Islander"],["A7","Two or more races"]];
+const ETHS=[["A1","Not Hispanic or Latino"],["A2","Hispanic or Latino"]];
+const RH_PRED=[["race","A0"],...RACES.map(r=>["race",r[0]]),["ethnicity","A0"],...ETHS.map(e=>["ethnicity",e[0]])];
 const EDUS=[["E1","Less than high school"],["E2","High school or equivalent"],["E3","Some college or associate"],["E4","Bachelor’s or higher"]];
 const VARS="Emp,EmpS,EarnS,HirA,Sep,TurnOvrS,FrmJbC";
 const DEMO_VARS="Emp,EmpS,EarnS,HirA,TurnOvrS";
@@ -245,6 +248,8 @@ const TIPS={
  realEarn:"Average monthly earnings divided by the state’s price level (BEA regional price parity), so pay can be compared across places in national-average dollars.",
  inShare:"Share of the area’s jobs held by people who live elsewhere (another state for states, another county for counties) (LEHD Origin-Destination Employment Statistics, the data behind OnTheMap).",
  outShare:"Share of employed residents whose job is elsewhere (another state for states, another county for counties) (LEHD Origin-Destination Employment Statistics).",
+ qPay:"Average yearly pay per private-sector job covered by unemployment insurance (BLS Quarterly Census of Employment and Wages, annual average).",
+ qEst:"Number of private-sector business establishments (BLS Quarterly Census of Employment and Wages, annual average).",
  lq:"Location quotient: this industry’s share of the state’s jobs divided by its share of U.S. jobs. Above 1.0 means the industry is more concentrated here than nationally.",
 };
 
@@ -423,7 +428,9 @@ async function loadAll(){
     await loadDemoAll(S.tFull,tick);
     prog("Loading population and income (ACS)…");await loadACS();
     prog("Loading cost of living (BEA)…");await loadBEA();
-    S.ready=true;fillQuarterPicker();loadCountyNames();loadIndustryList().then(()=>{if(/-i\d{3,4}$|^#i\d{3,4}$/.test(location.hash))render();});if(!OFFLINE)saveTables();
+    S.ready=true;fillQuarterPicker();loadCountyNames();
+    // employers/pay and worker profiles come from details.js; redraw list views once it arrives
+    loadDetails().then(()=>{if(CTX2&&!/^#[sci]/.test(location.hash))render();});loadIndustryList().then(()=>{if(/-i\d{3,4}$|^#i\d{3,4}$/.test(location.hash))render();});if(!OFFLINE)saveTables();
   }catch(e){S.err=e;S.ready=false;}
   S.loading=false;updateKeyBtn();render();
 }
@@ -486,16 +493,19 @@ async function loadDemo(s,i){
   const T=tD(),k=s+"|"+i+"|"+T;if(S.demo[k])return S.demo[k];
   const [y,q]=tparse(T);const qs=isA(T)?[1,2,3,4].filter(x=>tq(y,x)<=S.tLatest):[q];
   const sexs=[["sex","0"],["sex","1"],["sex","2"]];const ex=i==="00"?[]:[["industry",i]];
-  const [sa,se]=await Promise.all([
+  const [sa,se,rh]=await Promise.all([
     api("sa",bp(DEMO_VARS,isC(s)?"county:"+s.slice(2)+"&in=state:"+s.slice(0,2):"state:"+s,y,qs,[...sexs,...[["agegrp","A00"],...AGES.map(a=>["agegrp",a[0]])],...ex])),
     api("se",bp(DEMO_VARS,isC(s)?"county:"+s.slice(2)+"&in=state:"+s.slice(0,2):"state:"+s,y,qs,[...sexs,...[["education","E0"],...EDUS.map(e=>["education",e[0]]),["education","E5"]],...ex])),
+    // race by ethnicity (QWI "rh"); same order as fetch_qwi.py
+    api("rh",bp(DEMO_VARS,isC(s)?"county:"+s.slice(2)+"&in=state:"+s.slice(0,2):"state:"+s,y,qs,[...RH_PRED,...ex])).catch(e=>{if(e instanceof KeyError)throw e;return [];}),
   ]);
-  const d={age:{},edu:{},t:T};
+  const d={age:{},edu:{},rh:{},t:T};
   const pick=r=>{const o={};DEMO_VARS.split(",").forEach(v=>o[v]=num(r[v]));if(o.TurnOvrS!=null&&o.TurnOvrS>1)o.TurnOvrS/=100;return o;};
   const ga={},ge={};
   sa.forEach(r=>{(ga[r.agegrp+"|"+r.sex]??=[]).push(pick(r));});
   se.forEach(r=>{(ge[r.education+"|"+r.sex]??=[]).push(pick(r));});
   for(const k in ga)d.age[k]=aggCells(ga[k]);for(const k in ge)d.edu[k]=aggCells(ge[k]);
+  const gr={};rh.forEach(r=>{(gr[r.race+"|"+r.ethnicity]??=[]).push(pick(r));});for(const k in gr)d.rh[k]=aggCells(gr[k]);
   S.demo[k]=d;return d;
 }
 
@@ -503,7 +513,7 @@ async function loadDemo(s,i){
 const CTX=window.CTX||{};
 const CTX_SRC={bls:"BLS unemployment and job openings",acs:"Census ACS population, income and commuting",bea:"BEA cost of living",lodes:"LEHD commuting flows (OnTheMap)"};
 function cx(src,s,k){if(s.length===5)return src==="acs"?(CACS[s]?.[k]??null):src==="bls"?(CTX.blsC?.counties?.[s]?.[k]??null):null;const d=CTX[src];if(!d)return null;const o=s==="US"?d.us:d.states?.[s];const v=o?.[k];return v==null?null:v;}
-const ctxLabel=src=>src==="acs"?(CTX.acs?CTX.acs.year+" ACS":""):src==="bea"?(CTX.bea?String(CTX.bea.year):""):src==="lodes"?(CTX.lodes?String(CTX.lodes.year):""):src==="blsJ"?(CTX.bls?.labelJ||""):(CTX.bls?.label||"");
+const ctxLabel=src=>src==="qcew"?(CTX2?.qcew?String(CTX2.qcew.year):""):src==="acs"?(CTX.acs?CTX.acs.year+" ACS":""):src==="bea"?(CTX.bea?String(CTX.bea.year):""):src==="lodes"?(CTX.lodes?String(CTX.lodes.year):""):src==="blsJ"?(CTX.bls?.labelJ||""):(CTX.bls?.label||"");
 const ACS_CORE="NAME,B01003_001E,B19013_001E,B01002_001E,B08013_001E,B08303_001E,B08301_001E,B08301_003E,B08301_010E,B08301_021E,B23025_001E,B23025_002E,B20002_001E,B20002_002E,B20002_003E";
 const ACS_POW="B08007_001E,B08007_005E";
 function acsRows(core,pw){
@@ -677,6 +687,8 @@ const M={
  rpp:{label:"Cost of living",long:"Cost of living (U.S. = 100)",tip:"rpp",fmt:fIdx,need:"Emp",ctx:"bea",grp:"bea",allOnly:true,f:s=>s==="US"?(CTX.bea?100:null):cx("bea",s,"rpp")},
  inShare:{label:"Jobs held by out-of-staters",long:"Jobs held by out-of-state residents",tip:"inShare",fmt:fPct,need:"Emp",ctx:"lodes",grp:"lodes",allOnly:true,f:s=>{if(isC(s)){const o=CTX.lodesC?.counties?.[s];return o&&o.jobs?(o.jobs-o.same)/o.jobs:null;}const o=CTX.lodes?.states?.[s];return o&&o.jobs?o.inc/o.jobs:null;}},
  outShare:{label:"Residents working out of state",long:"Residents working in another state",tip:"outShare",fmt:fPct,need:"Emp",ctx:"lodes",grp:"lodes",allOnly:true,f:s=>{if(isC(s)){const o=CTX.lodesC?.counties?.[s];return o&&o.res?(o.res-o.same)/o.res:null;}const o=CTX.lodes?.states?.[s];const r=o?o.jobs-o.inc+o.out:0;return r?o.out/r:null;}},
+ qPay:{label:"Average annual pay (QCEW)",long:"Average annual pay, private sector (BLS QCEW)",tip:"qPay",fmt:fMoney,need:"Emp",ctx:"qcew",grp:"qcew",allOnly:true,f:s=>{const Q=CTX2?.qcew;const d=s==="US"?null:isC(s)?Q?.counties?.[s]:Q?.states?.[s];return d?.["10"]?.[2]??null;}},
+ qEst:{label:"Private employers (QCEW)",long:"Number of private employers (BLS QCEW)",tip:"qEst",fmt:fInt,need:"Emp",ctx:"qcew",grp:"qcew",allOnly:true,f:s=>{const Q=CTX2?.qcew;const d=s==="US"?null:isC(s)?Q?.counties?.[s]:Q?.states?.[s];return d?.["10"]?.[0]??null;}},
  eduPrem:{label:"Bachelor’s pay premium",long:"Bachelor’s vs. high school pay",tip:"eduPrem",fmt:fPct,need:"_full",allOnly:true,f:(s,i,t)=>{const d=s==="US"?usDemo(t):S.demoAllT[t]?.[s];return d&&d.E2&&d.E4!=null?d.E4/d.E2-1:null;}},
 };
 function usDemo(t){const o={};const w=k=>{let a=0,b=0;STATES.forEach(([f])=>{const v=S.demoAllT[t]?.[f]?.[k],e=val(f,"00",t,"EmpS");if(v!=null&&e){a+=v*e;b+=e;}});return b?a/b:null;};["sex1","sex2","E2","E4"].forEach(k=>o[k]=w(k));return o;}
@@ -706,7 +718,7 @@ function kpi(s,i,m,showRank,perLab){
   <div class="meta"><span>${perLab||per(m)}${rk?` · <b>#${rk.pos}</b> of ${rk.n}${rk.of?" "+rk.of:""}`:""}</span>${spark(series(s,i,m))}</div></div>`;
 }
 function indOptions(sel,allLabel){return (isSub(sel)?`<option value="${sel}" selected>${esc(IND[sel])} (NAICS ${sel})</option>`:"")+`<option value="00"${sel==="00"?" selected":""}>${allLabel||"All industries"}</option>`+SECTORS.map(([c,n])=>`<option value="${c}"${sel===c?" selected":""}>${esc(n)} (NAICS ${c})</option>`).join("");}
-const GRPS=[["qwi","Jobs and pay (Census QWI)"],["bls","Unemployment and openings (BLS)"],["acs","People and commuting (Census ACS)"],["bea","Cost of living (BEA)"],["lodes","Commuting flows (LEHD)"]];
+const GRPS=[["qwi","Jobs and pay (Census QWI)"],["bls","Unemployment and openings (BLS)"],["qcew","Employers and pay (BLS QCEW)"],["acs","People and commuting (Census ACS)"],["bea","Cost of living (BEA)"],["lodes","Commuting flows (LEHD)"]];
 function metricOptions(sel,ind){return GRPS.map(([g,l])=>{const ms=Object.keys(M).filter(m=>(M[m].grp||"qwi")===g&&!(M[m].allOnly&&ind!=="00")&&(g==="qwi"||avail(m)));return ms.length?`<optgroup label="${l}">${ms.map(m=>`<option value="${m}"${m===sel?" selected":""}>${M[m].long}</option>`).join("")}</optgroup>`:"";}).join("");}
 function bins(vals){const v=vals.filter(x=>x!=null).sort((a,b)=>a-b);if(!v.length)return[];const q=k=>v[Math.min(v.length-1,Math.floor(k*v.length))];return [q(.2),q(.4),q(.6),q(.8)];}
 function binOf(x,b){if(x==null)return -1;let k=0;while(k<b.length&&x>=b[k])k++;return k;}
@@ -743,12 +755,12 @@ function loadTopo(){
   TOPO.catch(()=>{TOPO=null;});
   return TOPO;
 }
-const CM=["empYoY","emp","earn","earnYoY","hireRate","turn","net","medEarn","medGap","ur","urChg","pop","mhi","lfpr","commute","wfh","transit","inShare","outShare"];
+const CM=["empYoY","emp","earn","earnYoY","hireRate","turn","net","qPay","qEst","medEarn","medGap","ur","urChg","pop","mhi","lfpr","commute","wfh","transit","inShare","outShare"];
 const cLong=m=>m==="inShare"?"Jobs held by people from other counties":m==="outShare"?"Residents working in other counties":M[m].long;
-const cSrc=m=>M[m].ctx==="acs"?"ACS":M[m].ctx==="bls"?"BLS":M[m].ctx==="lodes"?"LEHD":"";
-const cmOk=(m,i)=>!M[m].ctx?true:i!=="00"?false:M[m].ctx==="acs"?!!ACS5_YEAR:M[m].ctx==="bls"?!!CTX.blsC:M[m].ctx==="lodes"?!!CTX.lodesC:false;
+const cSrc=m=>M[m].ctx==="qcew"?"QCEW":M[m].ctx==="acs"?"ACS":M[m].ctx==="bls"?"BLS":M[m].ctx==="lodes"?"LEHD":"";
+const cmOk=(m,i)=>!M[m].ctx?true:i!=="00"?false:M[m].ctx==="qcew"?!!CTX2?.qcew:M[m].ctx==="acs"?!!ACS5_YEAR:M[m].ctx==="bls"?!!CTX.blsC:M[m].ctx==="lodes"?!!CTX.lodesC:false;
 // period label for county-level numbers
-const cPer=m=>M[m].ctx==="acs"?(ACS5_YEAR?`${ACS5_YEAR-4}–${ACS5_YEAR} ACS 5-year`:""):M[m].ctx==="bls"?(CTX.blsC?.label||"")+" (not seasonally adjusted)":M[m].ctx==="lodes"?String(CTX.lodesC?.year||""):tlab(mT(m));
+const cPer=m=>M[m].ctx==="qcew"?(CTX2?.qcew?CTX2.qcew.year+" annual average":""):M[m].ctx==="acs"?(ACS5_YEAR?`${ACS5_YEAR-4}–${ACS5_YEAR} ACS 5-year`:""):M[m].ctx==="bls"?(CTX.blsC?.label||"")+" (not seasonally adjusted)":M[m].ctx==="lodes"?String(CTX.lodesC?.year||""):tlab(mT(m));
 function cmOptions(sel,i){return CM.filter(m=>cmOk(m,i)).map(m=>`<option value="${m}"${m===sel?" selected":""}>${cLong(m)}${M[m].ctx?" ("+cSrc(m)+")":""}</option>`).join("");}
 function legendHTML(b,m){const f=x=>M[m].fmt(x);return b.length?[`<span><i style="background:var(--c1)"></i>below ${f(b[0])}</span>`,...b.slice(0,3).map((x,j)=>`<span><i style="background:var(--c${j+2})"></i>${f(x)}–${f(b[j+1])}</span>`),`<span><i style="background:var(--c5)"></i>${f(b[3])}+</span>`,`<span><i style="background:var(--c0)"></i>not published or not loaded</span>`].join(""):"";}
 const MAPS={};
@@ -850,14 +862,14 @@ async function viewState(s,i){
   viewStateInner(s,i);
   if(isSub(i)){const blk=V.querySelector(".kpis");if(blk&&!NATSUB[i])blk.insertAdjacentHTML("afterend",`<p class="note" id="natsub">Ranks among states for this detailed industry need data for all 51 states (about 200 requests). <button class="btn ghost" type="button" id="natgo">Load and rank</button></p>`);
     const b=document.getElementById("natgo");if(b)b.onclick=async()=>{b.disabled=true;await ensureSubAll(i,n=>{b.textContent=`Loading… ${n} of ${STATES.length} states`;});if(location.hash===h)viewState(s,i);};}
-  if(i!=="00")addSubSection(s,i,h);else addEarnSection(s,h);
+  if(i!=="00")addSubSection(s,i,h);else{addEarnSection(s,h);addPeopleSection(s,h);addDetailSections(s,h);}
 }
 async function viewCounty(g,i){
   const h=location.hash;
   if(isSub(i)){await loadIndustryList();nameInd(i);
     const s=g.slice(0,2);if(!subLoaded(g,[i])||!gotC(s,"00")){loadingView(`Loading ${IND[i]}`,"A few requests to the Census API…");try{await Promise.all([ensureSub(g,[i]),ensureCounties(s),loadCountyNames()]);}catch(e){V.innerHTML=`<p class="err">${esc(e.message)}</p>`;return;}if(location.hash!==h)return;}}
   await viewCountyInner(g,i);
-  if(i!=="00"&&location.hash===h)addSubSection(g,i,h);else if(location.hash===h)addEarnSection(g,h);
+  if(i!=="00"&&location.hash===h)addSubSection(g,i,h);else if(location.hash===h){addEarnSection(g,h);addPeopleSection(g,h);addDetailSections(g,h);}
 }
 async function viewIndustry(i){
   const h=location.hash;
@@ -934,7 +946,8 @@ function addEarnSection(geo,h){
 
 /* ---------- Download builder ---------- */
 const DLV=[["Emp","Jobs (beginning of quarter)"],["EmpS","Full-quarter jobs"],["EarnS","Average monthly earnings"],["HirA","Hires"],["Sep","Separations"],["TurnOvrS","Turnover rate"],["FrmJbC","Net job change at employers"]];
-const DLG={none:["sa",[]],sex:["sa",["sex"]],age:["sa",["agegrp"]],sexage:["sa",["sex","agegrp"]],edu:["se",["education"]],sexedu:["se",["sex","education"]]};
+const DLG={none:["sa",[]],sex:["sa",["sex"]],age:["sa",["agegrp"]],sexage:["sa",["sex","agegrp"]],edu:["se",["education"]],sexedu:["se",["sex","education"]],race:["rh",["race"]],eth:["rh",["ethnicity"]],raceeth:["rh",["race","ethnicity"]]};
+const RACEL=Object.fromEntries([["A0","All races"],...RACES]),ETHL=Object.fromEntries([["A0","All"],...ETHS]);
 const SEXL={"0":"All","1":"Male","2":"Female"},AGEL=Object.fromEntries([["A00","All ages"],...AGES]),EDUL=Object.fromEntries([["E0","All"],...EDUS,["E5","Not tracked (under 25)"]]);
 const DL={geo:"states",states:[],cstate:"06",ind:"total",sectors:[],sub:"31-33",subLevel:"3",group:"none",vars:["Emp","EarnS","HirA","TurnOvrS"],period:"quarter",sumFlows:false,from:null,to:null,rows:null};
 function dlPlan(){
@@ -948,6 +961,8 @@ function dlPlan(){
   if(gk.includes("sex"))extra.push(...["0","1","2"].map(v=>["sex",v]));
   if(gk.includes("agegrp"))extra.push(["agegrp","A00"],...AGES.map(a=>["agegrp",a[0]]));
   if(gk.includes("education"))extra.push(["education","E0"],...EDUS.map(e=>["education",e[0]]),["education","E5"]);
+  if(gk.includes("race"))extra.push(["race","A0"],...RACES.map(r=>["race",r[0]]));
+  if(gk.includes("ethnicity"))extra.push(["ethnicity","A0"],...ETHS.map(e=>["ethnicity",e[0]]));
   const vars=[...new Set([...DL.vars,"EmpS"])].join(",");
   // the API caps a request's size, so long industry lists go in chunks of 25
   const chunks=[];if(!inds.length)chunks.push([]);for(let k=0;k<inds.length;k+=25)chunks.push(inds.slice(k,k+25));
@@ -959,21 +974,98 @@ async function dlRun(onStep){
   let n=0;const out=[];
   await pool(plan.reqs,6,async r=>{const rows=await api(r.ds,r.p).catch(e=>{if(e instanceof KeyError)throw e;return [];});rows.forEach(x=>out.push(x));n++;onStep(n,plan.reqs.length);});
   let recs=out.map(r=>{const g=r.county?r.state+r.county:r.state;const o={year:+r.year,quarter:+r.quarter,fips:g,place:r.county?geoFull(g):ST[r.state]?.n||g,naics:r.industry||"00",industry:IND[r.industry||"00"]||("NAICS "+r.industry)};
-    if(plan.gk.includes("sex"))o.sex=SEXL[r.sex]||r.sex;if(plan.gk.includes("agegrp"))o.age=AGEL[r.agegrp]||r.agegrp;if(plan.gk.includes("education"))o.education=EDUL[r.education]||r.education;
+    if(plan.gk.includes("sex"))o.sex=SEXL[r.sex]||r.sex;if(plan.gk.includes("agegrp"))o.age=AGEL[r.agegrp]||r.agegrp;if(plan.gk.includes("education"))o.education=EDUL[r.education]||r.education;if(plan.gk.includes("race"))o.race=RACEL[r.race]||r.race;if(plan.gk.includes("ethnicity"))o.ethnicity=ETHL[r.ethnicity]||r.ethnicity;
     DLV.forEach(([k])=>{let v=num(r[k]);if(k==="TurnOvrS"&&v!=null&&v>1)v/=100;o[k]=v;});return o;});
   if(DL.period==="year"){
-    const grp=new Map();recs.forEach(o=>{const key=[o.year,o.fips,o.naics,o.sex,o.age,o.education].join("|");if(!grp.has(key))grp.set(key,[]);grp.get(key).push(o);});
+    const grp=new Map();recs.forEach(o=>{const key=[o.year,o.fips,o.naics,o.sex,o.age,o.education,o.race,o.ethnicity].join("|");if(!grp.has(key))grp.set(key,[]);grp.get(key).push(o);});
     const FLOW=["HirA","Sep","FrmJbC"];
     recs=[...grp.values()].map(list=>{const a=aggCells(list);const o={...list[0]};delete o.quarter;o.quarters_included=list.length;
       DLV.forEach(([k])=>{if(DL.sumFlows&&FLOW.includes(k)){const v=list.map(x=>x[k]).filter(x=>x!=null);o[k]=v.length?v.reduce((p,q)=>p+q,0):null;}else o[k]=a[k];});return o;});
   }
   recs.sort((a,b)=>a.fips.localeCompare(b.fips)||String(a.naics).localeCompare(b.naics)||a.year-b.year||(a.quarter||0)-(b.quarter||0));
-  const cols=["year",...(DL.period==="quarter"?["quarter"]:[]),"fips","place","naics","industry",...(plan.gk.includes("sex")?["sex"]:[]),...(plan.gk.includes("agegrp")?["age"]:[]),...(plan.gk.includes("education")?["education"]:[]),...DL.vars,...(DL.period==="year"?["quarters_included"]:[])];
+  const cols=["year",...(DL.period==="quarter"?["quarter"]:[]),"fips","place","naics","industry",...(plan.gk.includes("sex")?["sex"]:[]),...(plan.gk.includes("agegrp")?["age"]:[]),...(plan.gk.includes("education")?["education"]:[]),...(plan.gk.includes("race")?["race"]:[]),...(plan.gk.includes("ethnicity")?["ethnicity"]:[]),...DL.vars,...(DL.period==="year"?["quarters_included"]:[])];
   return {cols,recs};
 }
 function csvOf(res){const q=(v,c)=>v==null?"":typeof v==="number"?(c==="TurnOvrS"?+v.toFixed(4):DLV.some(x=>x[0]===c)?Math.round(v):v):/[",\n]/.test(v)?`"${String(v).replace(/"/g,'""')}"`:v;
   const head=res.cols.map(c=>{const l=DLV.find(x=>x[0]===c)?.[1];return l?(DL.period==="year"?l.replace(" (beginning of quarter)","")+(DL.sumFlows&&["HirA","Sep","FrmJbC"].includes(c)?" (yearly total)":" (yearly average)"):l):c;});return [head.join(","),...res.recs.map(r=>res.cols.map(c=>q(r[c],c)).join(","))].join("\n");}
+/* ---------- Download: other sources (Census ACS live; LEHD and BLS QCEW from details.js) ---------- */
+const DSRC=[["qwi","Jobs and pay (Census QWI)"],["acs","People who live here (Census ACS)"],["lehd","Workers by where they work and live (LEHD)"],["qcew","Employers and pay by industry (BLS QCEW)"]];
+const ACST=[["B01001","Age by sex"],["B03002","Race and Hispanic origin"],["B15003","Education, adults 25+"],["B17001","Poverty status"],["C24010","Occupation by sex"],["B20002","Median earnings by sex"],["B19013","Median household income"]];
+const DLO={geo:"states",states:[],cstate:"06",tables:["B01001","B03002","B15003"],res:null};
+function dsPicker(){return `<fieldset style="grid-column:1/-1"><legend>Data</legend><div class="row">${DSRC.map(([k,l])=>`<label class="opt"><input type="radio" name="ds" value="${k}"${(DL.ds||"qwi")===k?" checked":""}> <span>${l}</span></label>`).join("")}</div></fieldset>`;}
+function dlOtherGeos(){
+  if(DLO.geo==="counties")return countiesOf(DLO.cstate);
+  return DLO.geo==="some"?DLO.states:STATES.map(x=>x[0]);
+}
+async function dlOtherRun(onStep){
+  const ds=DL.ds,recs=[];let cols;
+  if(ds==="acs"){
+    const c=DLO.geo==="counties",d=c?"acs5":"acs1",y=c?ACS5_YEAR:CTX.acs?.year;
+    if(!y)throw new Error("The Census survey year isn’t loaded yet. Reload the page and try again.");
+    if(c)await loadCountyNames();
+    const keep=new Set(dlOtherGeos());let n=0;
+    for(const g of DLO.tables){
+      const lab=await groupLabels(d,y,g);
+      const t=await censusJSON(`https://api.census.gov/data/${y}/acs/${d}?get=group(${g})&for=${c?"county:*&in=state:"+DLO.cstate:"state:*"}`);
+      n++;onStep(n,DLO.tables.length);
+      if(!Array.isArray(t)||t.length<2)continue;const h=t[0];
+      t.slice(1).forEach(r=>{const o=Object.fromEntries(h.map((k,j)=>[k,r[j]]));const geo=c?o.state+o.county:o.state;if(!keep.has(geo))return;
+        Object.keys(lab).sort().forEach(v=>{const e=num(o[v]),m=num(o[v.replace(/E$/,"M")]);
+          recs.push({fips:geo,place:c?geoFull(geo):ST[geo]?.n||geo,table:g,variable:v.replace(/E$/,""),category:labParts(lab[v]).join(" — ")||"Total",estimate:e!=null&&e>=0?e:null,moe:m!=null&&m>=0?m:null,survey:c?`ACS 5-year ${y-4}-${y}`:`ACS 1-year ${y}`});});});
+    }
+    cols=["fips","place","table","variable","category","estimate","moe","survey"];
+  }else{
+    await loadDetails();if(!CTX2)throw new Error("This data comes from the saved file details.js, which isn’t here yet. Run get_context_data.bat (or the GitHub data run) to create it.");
+    const geos=dlOtherGeos();
+    if(ds==="lehd"){
+      const L=CTX2.lodesW;if(!L)throw new Error("details.js has no LEHD worker profiles.");
+      const lab=Object.fromEntries([["C000","All jobs"],...LGROUPS.flatMap(([t,items])=>items.map(([k,l])=>[k,t+": "+l])),...Array.from({length:20},(_,i)=>["CNS"+String(i+1).padStart(2,"0"),"Industry: "+(SECTORS[i]?.[1]||"NAICS sector "+(i+1))])]);
+      geos.forEach(g=>[["wac","Jobs located here"],["rac","Jobs held by residents"]].forEach(([k,w])=>{const v=isC(g)?L[k]?.[g]:L[k+"S"]?.[g];if(!v)return;
+        L.cols.forEach((c,i)=>recs.push({fips:g,place:geoFull(g),counted_by:w,column:c,measure:lab[c]||c,jobs:v[i],year:L.year}));}));
+      cols=["fips","place","counted_by","column","measure","jobs","year"];
+    }else{
+      const Q=CTX2.qcew;if(!Q)throw new Error("details.js has no BLS QCEW data.");
+      geos.forEach(g=>{const d=isC(g)?Q.counties?.[g]:Q.states?.[g];if(!d)return;
+        [["10","All private industries"],...SECTORS.map(([c,n])=>[c,n])].forEach(([c,n])=>{if(!d[c])return;recs.push({fips:g,place:geoFull(g),naics:c,industry:n,employers:d[c][0],jobs:d[c][1],avg_annual_pay:d[c][2],year:Q.year});});});
+      cols=["fips","place","naics","industry","employers","jobs","avg_annual_pay","year"];
+    }
+    onStep(1,1);
+  }
+  return {cols,recs};
+}
+function csvPlain(res){const q=v=>v==null?"":typeof v==="number"?v:/[",\n]/.test(v)?`"${String(v).replace(/"/g,'""')}"`:v;return [res.cols.join(","),...res.recs.map(r=>res.cols.map(c=>q(r[c])).join(","))].join("\n");}
+function viewDownloadOther(){
+  const ck=(name,val,cur,label)=>`<label class="opt"><input type="radio" name="${name}" value="${val}"${cur===val?" checked":""}> <span>${label}</span></label>`;
+  const ds=DL.ds,needKey=ds==="acs"&&!KEY;
+  V.innerHTML=`<h1>Download data</h1><p class="lede">${ds==="acs"?"Population tables from the Census American Community Survey, with margins of error. One row per place and table line.":ds==="lehd"?"Jobs by worker age, earnings, industry, race, ethnicity, education and sex, counted where people work and where they live (LEHD, the data behind OnTheMap).":"Private-sector employers, jobs and average annual pay by industry (BLS Quarterly Census of Employment and Wages, annual averages)."}</p>
+  ${needKey?`<p class="note warn">Census survey downloads fetch live data, so they need your Census API key. <a href="#setup">Add your key</a></p>`:""}
+  <form id="dlf" class="section dl-grid">${dsPicker()}
+   <fieldset><legend>Places</legend>
+    ${ck("geo","states",DLO.geo,"All 50 states and D.C.")}${ck("geo","some",DLO.geo,"Selected states")}
+    ${DLO.geo==="some"?`<select multiple id="dls" aria-label="States">${STATES.map(([f,,n])=>`<option value="${f}"${DLO.states.includes(f)?" selected":""}>${n}</option>`).join("")}</select><small style="color:var(--muted)">Hold Ctrl to pick several</small>`:""}
+    ${ck("geo","counties",DLO.geo,"Every county in one state")}
+    ${DLO.geo==="counties"?`<select id="dlc" aria-label="State">${STATES.map(([f,,n])=>`<option value="${f}"${DLO.cstate===f?" selected":""}>${n}</option>`).join("")}</select>`:""}
+   </fieldset>
+   ${ds==="acs"?`<fieldset><legend>Tables</legend>${ACST.map(([k,l])=>`<label class="opt"><input type="checkbox" name="tbl" value="${k}"${DLO.tables.includes(k)?" checked":""}> <span>${l} <span class="code">${k}</span></span></label>`).join("")}
+     <small style="color:var(--muted)">States use the 1-year survey; counties use the 5-year survey, which covers every county.</small></fieldset>`:""}
+  </form>
+  <div class="section panel"><div class="row"><button class="btn" type="button" id="dlgo"${needKey||(ds==="acs"&&!DLO.tables.length)||(DLO.geo==="some"&&!DLO.states.length)?" disabled":""}>Prepare download</button><span id="dlmsg" style="color:var(--muted);font-size:14px"></span></div><div id="dlout"></div></div>`;
+  const f=document.getElementById("dlf");
+  f.onchange=e=>{const t=e.target;
+    if(t.name==="ds"){DL.ds=t.value;return viewDownload();}
+    if(t.name==="geo")DLO.geo=t.value;else if(t.name==="tbl")DLO.tables=[...f.querySelectorAll('input[name="tbl"]:checked')].map(x=>x.value);
+    else if(t.id==="dls")DLO.states=[...t.selectedOptions].map(o=>o.value);else if(t.id==="dlc")DLO.cstate=t.value;
+    viewDownloadOther();};
+  document.getElementById("dlgo").onclick=async()=>{const b=document.getElementById("dlgo"),m=document.getElementById("dlmsg");b.disabled=true;
+    try{const res=await dlOtherRun((n,t)=>{m.textContent=`Preparing… ${n} of ${t}`;});m.textContent="";b.disabled=false;
+      const prev=res.recs.slice(0,8);
+      document.getElementById("dlout").innerHTML=`<p style="margin:12px 0 6px"><b>${fInt(res.recs.length)}</b> rows ready.</p><div class="row"><button class="btn" type="button" id="dlcsv">Download CSV</button><span style="font-size:13px;color:var(--muted)">Blank cells are values the agency withholds or doesn’t publish.</span></div>
+       ${prev.length?`<div class="tbl-wrap" style="margin-top:10px"><table><thead><tr>${res.cols.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${prev.map(r=>`<tr>${res.cols.map(c=>`<td>${r[c]==null?"":esc(r[c])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`:`<p class="note">No rows came back for these choices.</p>`}`;
+      const c=document.getElementById("dlcsv");if(c)c.onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csvPlain(res)],{type:"text/csv"}));a.download=`workforce_atlas_${ds}_${DLO.geo==="counties"?"counties_"+DLO.cstate:DLO.geo}.csv`;document.body.appendChild(a);a.click();a.remove();};
+    }catch(e){m.innerHTML=`<span class="err">${esc(e.message)}</span>`;b.disabled=false;}};
+}
 function viewDownload(){
+  if(DL.ds&&DL.ds!=="qwi")return viewDownloadOther();
   if(!S.ready){V.innerHTML=`<p class="note">Loading data first…</p>`;return;}
   if(!DL.to)DL.to=S.tLatest.slice(0,4);if(!DL.from)DL.from=String(+DL.to-2);
   const yrs=[];for(let y=+S.tLatest.slice(0,4);y>=2000;y--)yrs.push(y);
@@ -981,7 +1073,7 @@ function viewDownload(){
   const plan=dlPlan();
   V.innerHTML=`<h1>Download data</h1><p class="lede">Choose places, industries, groups, measures and years. The site fetches the numbers from the Census Bureau’s Quarterly Workforce Indicators and gives you a CSV file you can open in Excel.</p>
   ${!KEY?`<p class="note warn">Downloads fetch live data, so they need your Census API key. <a href="#setup">Add your key</a></p>`:""}
-  <form id="dlf" class="section dl-grid">
+  <form id="dlf" class="section dl-grid">${dsPicker()}
    <fieldset><legend>Places</legend>
     ${ck("geo","states",DL.geo,"All 50 states and D.C.")}${ck("geo","some",DL.geo,"Selected states")}
     ${DL.geo==="some"?`<select multiple id="dls" aria-label="States">${STATES.map(([f,,n])=>`<option value="${f}"${DL.states.includes(f)?" selected":""}>${n}</option>`).join("")}</select><small style="color:var(--muted)">Hold Ctrl to pick several</small>`:""}
@@ -996,7 +1088,7 @@ function viewDownload(){
       <div class="row" style="margin-top:6px">${ck("lvl","3",DL.subLevel,"3-digit")}${ck("lvl","4",DL.subLevel,"4-digit")}</div>${!Object.keys(SUBNAME).length?`<small class="err">Detailed industry list not loaded yet.</small>`:""}`:""}
    </fieldset>
    <fieldset><legend>Groups</legend>
-    ${ck("grp","none",DL.group,"Everyone (no breakdown)")}${ck("grp","sex",DL.group,"By sex")}${ck("grp","age",DL.group,"By age group")}${ck("grp","sexage",DL.group,"By sex and age")}${ck("grp","edu",DL.group,"By education")}${ck("grp","sexedu",DL.group,"By sex and education")}
+    ${ck("grp","none",DL.group,"Everyone (no breakdown)")}${ck("grp","sex",DL.group,"By sex")}${ck("grp","age",DL.group,"By age group")}${ck("grp","sexage",DL.group,"By sex and age")}${ck("grp","edu",DL.group,"By education")}${ck("grp","sexedu",DL.group,"By sex and education")}${ck("grp","race",DL.group,"By race")}${ck("grp","eth",DL.group,"By Hispanic or Latino origin")}${ck("grp","raceeth",DL.group,"By race and Hispanic origin")}
    </fieldset>
    <fieldset><legend>Measures</legend>
     ${DLV.map(([k,l])=>`<label class="opt"><input type="checkbox" name="var" value="${k}"${DL.vars.includes(k)?" checked":""}> <span>${l}</span></label>`).join("")}
@@ -1015,6 +1107,7 @@ function viewDownload(){
   </div>`;
   const f=document.getElementById("dlf");
   f.onchange=e=>{const t=e.target;
+    if(t.name==="ds"){DL.ds=t.value;return viewDownload();}
     if(t.name==="geo")DL.geo=t.value;else if(t.name==="ind")DL.ind=t.value;else if(t.name==="lvl")DL.subLevel=t.value;else if(t.name==="grp")DL.group=t.value;else if(t.name==="per")DL.period=t.value;else if(t.name==="flows")DL.sumFlows=t.value==="sum";
     else if(t.name==="var")DL.vars=[...f.querySelectorAll('input[name="var"]:checked')].map(x=>x.value);
     else if(t.id==="dls")DL.states=[...t.selectedOptions].map(o=>o.value);else if(t.id==="dlc")DL.cstate=t.value;else if(t.id==="dlsec")DL.sectors=[...t.selectedOptions].map(o=>o.value);else if(t.id==="dlsub")DL.sub=t.value;
@@ -1033,6 +1126,101 @@ function viewDownload(){
       const c=document.getElementById("dlcsv");if(c)c.onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csvOf(res)],{type:"text/csv"}));a.download=`workforce_atlas_${DL.geo}_${DL.ind}_${DL.group}_${DL.period}_${DL.from}-${DL.to}.csv`;document.body.appendChild(a);a.click();a.remove();};
     }catch(e){m.innerHTML=`<span class="err">${esc(e.message)}</span>`;b.disabled=false;delete b.dataset.busy;}
   };
+}
+
+/* ---------- People (Census ACS): age and sex, race and ethnicity, education, poverty, occupation ---------- */
+// Tables: B01001 sex by age · B03002 Hispanic origin by race · B15003 education (25+) · B17001 poverty · C24010 occupation by sex
+const PG=["B01001","B03002","B15003","B17001","C24010"];const PEOPLE={};
+async function acsGroupRows(geo,g){
+  const c=isC(geo),ds=c?"acs5":"acs1",y=c?ACS5_YEAR:CTX.acs?.year;if(!y||!KEY)return null;
+  const forv=geo==="US"?"us:1":c?`county:${geo.slice(2)}&in=state:${geo.slice(0,2)}`:`state:${geo}`;
+  const [lab,t]=await Promise.all([groupLabels(ds,y,g),censusJSON(`https://api.census.gov/data/${y}/acs/${ds}?get=group(${g})&for=${forv}`)]);
+  if(!Array.isArray(t)||t.length<2)return null;const h=t[0],r=t[1];
+  return Object.keys(lab).sort().map(n=>{const v=num(r[h.indexOf(n)]),mo=num(r[h.indexOf(n.replace(/E$/,"M"))]);return {parts:labParts(lab[n]),v:v!=null&&v>=0?v:null,moe:mo!=null&&mo>=0?mo:null};});
+}
+const AGEB=[[0,"Under 18"],[18,"18–24"],[25,"25–34"],[35,"35–44"],[45,"45–54"],[55,"55–64"],[65,"65+"]];
+const ageStart=t=>/^Under/i.test(t)?0:(+(String(t).match(/\d+/)||[NaN])[0]);
+function peopleCalc(G){
+  const o={};
+  const a=G.B01001;if(a){const bins=AGEB.map(([lo,l])=>({l,lo,m:0,f:0}));let tot=null,men=null,wom=null;
+    a.forEach(r=>{if(!r.parts.length)tot=r.v;else if(r.parts.length===1){if(r.parts[0]==="Male")men=r.v;if(r.parts[0]==="Female")wom=r.v;}
+      else if(r.parts.length===2&&r.v!=null){const st=ageStart(r.parts[1]);if(isNaN(st))return;let k=bins.length-1;while(k>0&&st<bins[k].lo)k--;bins[k][r.parts[0]==="Male"?"m":"f"]+=r.v;}});
+    o.age={bins,tot,men,wom};}
+  const rc=G.B03002;if(rc){const tot=rc.find(r=>!r.parts.length)?.v;const nh=rc.filter(r=>r.parts.length===2&&/^Not Hispanic/i.test(r.parts[0]));
+    const nm=t=>t.replace(/ alone$/,"").replace("Black or African American","Black").replace("American Indian and Alaska Native","American Indian or Alaska Native").replace("Native Hawaiian and Other Pacific Islander","Native Hawaiian or Pacific Islander");
+    const list=nh.map(r=>({l:nm(r.parts[1]),v:r.v,moe:r.moe}));const hisp=rc.find(r=>r.parts.length===1&&/^Hispanic/i.test(r.parts[0]));
+    if(hisp)list.unshift({l:"Hispanic or Latino (any race)",v:hisp.v,moe:hisp.moe});o.race={tot,list:list.filter(x=>x.v!=null)};}
+  const ed=G.B15003;if(ed){const tot=ed.find(r=>!r.parts.length)?.v;const g={"Less than high school":0,"High school or GED":0,"Some college or associate":0,"Bachelor’s degree":0,"Graduate degree":0};let seenHS=false;
+    ed.filter(r=>r.parts.length===1&&r.v!=null).forEach(r=>{const t=r.parts[0];
+      if(/high school diploma|GED/i.test(t)){g["High school or GED"]+=r.v;seenHS=true;}else if(/Some college|Associate/i.test(t))g["Some college or associate"]+=r.v;
+      else if(/Bachelor/i.test(t))g["Bachelor’s degree"]+=r.v;else if(/Master|Professional|Doctorate/i.test(t))g["Graduate degree"]+=r.v;else if(!seenHS)g["Less than high school"]+=r.v;});
+    o.edu={tot,list:Object.entries(g).map(([l,v])=>({l,v}))};}
+  const pv=G.B17001;if(pv){const tot=pv.find(r=>!r.parts.length);const below=pv.find(r=>r.parts.length===1&&/below poverty/i.test(r.parts[0]));o.pov=tot?.v&&below?.v!=null?{rate:below.v/tot.v,moe:below.moe!=null?below.moe/tot.v:null}:null;}
+  const oc=G.C24010;if(oc){const tot=oc.find(r=>!r.parts.length)?.v;const g={};oc.filter(r=>r.parts.length===2&&r.v!=null).forEach(r=>{g[r.parts[1]]=(g[r.parts[1]]||0)+r.v;});
+    o.occ={tot,list:Object.entries(g).map(([l,v])=>({l:l.replace(/ occupations$/,""),v})).sort((a,b)=>b.v-a.v)};}
+  return o;
+}
+async function loadPeople(geo){
+  if(PEOPLE[geo])return PEOPLE[geo];
+  if(isC(geo))await loadCountyNames();
+  const G={};await Promise.all(PG.map(async g=>{try{G[g]=await acsGroupRows(geo,g);}catch(e){}}));
+  if(!Object.values(G).some(Boolean))return null;
+  const c=isC(geo);return PEOPLE[geo]={...peopleCalc(G),src:c?`ACS 5-year, ${ACS5_YEAR-4}–${ACS5_YEAR}`:`ACS 1-year, ${CTX.acs?.year}`,G};
+}
+function shareRows(list,tot){const mx=Math.max(1,...list.map(x=>x.v||0));return list.map(x=>`<div class="demo-row"><span>${esc(x.l)}</span><div class="bar"><b style="width:${x.v?100*x.v/mx:0}%"></b></div><span class="num"><b>${show(x.v!=null&&tot?fPct(x.v/tot):null)}</b>${x.moe!=null&&tot?`<small style="color:var(--muted);font-weight:400"> ±${(100*x.moe/tot).toFixed(1)}</small>`:""}</span></div>`).join("");}
+function peoplePanel(p){
+  const a=p.age;const mx=a?Math.max(1,...a.bins.flatMap(b=>[b.m,b.f])):1;
+  const pyr=a?a.bins.map(b=>`<div style="display:grid;grid-template-columns:1fr 70px 1fr;gap:8px;align-items:center;font-size:13px;padding:3px 0"><div style="display:flex;justify-content:flex-end;align-items:center;gap:6px"><span class="num" style="color:var(--muted)">${fCompact(b.m)}</span><div style="height:12px;width:${100*b.m/mx}%;background:var(--c4);border-radius:3px 0 0 3px"></div></div><div style="text-align:center">${b.l}</div><div style="display:flex;align-items:center;gap:6px"><div style="height:12px;width:${100*b.f/mx}%;background:var(--c2);border-radius:0 3px 3px 0"></div><span class="num" style="color:var(--muted)">${fCompact(b.f)}</span></div></div>`).join(""):"";
+  return `<div class="kpis">
+    ${a?`<div class="kpi"><div class="lab">Population</div><div class="val">${show(fInt(a.tot))}</div><div class="meta"><span>${esc(p.src)}</span></div></div>`:""}
+    ${a&&a.tot&&a.wom!=null?`<div class="kpi"><div class="lab">Women</div><div class="val">${fPct(a.wom/a.tot)}</div><div class="meta"><span>of residents</span></div></div>`:""}
+    ${p.pov?`<div class="kpi"><div class="lab">Poverty rate</div><div class="val">${fPct(p.pov.rate)}</div><div class="meta"><span>${p.pov.moe!=null?"± "+(100*p.pov.moe).toFixed(1)+" pts":""}</span></div></div>`:""}
+    ${p.edu?.tot?`<div class="kpi"><div class="lab">Bachelor’s or higher</div><div class="val">${fPct((p.edu.list[3].v+p.edu.list[4].v)/p.edu.tot)}</div><div class="meta"><span>adults 25+</span></div></div>`:""}
+  </div>
+  <div class="demo-grid" style="margin-top:14px">
+   ${a?`<div class="panel"><h3>Age and sex</h3><div style="display:grid;grid-template-columns:1fr 70px 1fr;font-size:12px;color:var(--muted);margin:8px 0 4px"><span style="text-align:right">Men</span><span></span><span>Women</span></div>${pyr}</div>`:""}
+   ${p.race?`<div class="panel"><h3>Race and ethnicity</h3><p class="note" style="margin:8px 0">Share of residents. Groups other than Hispanic are non-Hispanic. ± is the margin of error in points.</p>${shareRows(p.race.list,p.race.tot)}</div>`:""}
+   ${p.edu?`<div class="panel"><h3>Education</h3><p class="note" style="margin:8px 0">Adults 25 and older</p>${shareRows(p.edu.list,p.edu.tot)}</div>`:""}
+   ${p.occ?`<div class="panel"><h3>Occupations</h3><p class="note" style="margin:8px 0">Employed residents 16 and older</p>${shareRows(p.occ.list,p.occ.tot)}</div>`:""}
+  </div><p style="font-size:12px;color:var(--muted);margin:0">Source: Census American Community Survey, ${esc(p.src)} (tables B01001, B03002, B15003, B17001, C24010). Survey estimates; small counties have wide margins of error.</p>`;
+}
+function addPeopleSection(geo,h){
+  const anchor=document.getElementById("demo");if(!anchor)return;
+  if(!KEY){anchor.insertAdjacentHTML("afterend",`<div class="section" id="people"><div class="sec-head"><h2>People who live here</h2><p>Census American Community Survey</p></div><p class="note">Age, race and ethnicity, education, poverty and occupations load live with a Census API key. <a href="#setup">Add a key</a></p></div>`);return;}
+  anchor.insertAdjacentHTML("afterend",`<div class="section" id="people"><div class="sec-head"><h2>People who live here</h2><p>Residents, from the Census American Community Survey</p></div><div class="panel">Loading…</div></div>`);
+  loadPeople(geo).then(p=>{const el=document.getElementById("people");if(!el||location.hash!==h)return;el.querySelector(".panel").outerHTML=p?peoplePanel(p):`<p class="note">These tables couldn’t be loaded from the Census API.</p>`;})
+   .catch(e=>{const el=document.getElementById("people");if(el)el.querySelector(".panel").innerHTML=`<span class="err">${esc(e.message)}</span>`;});
+}
+
+/* ---------- Saved details: LEHD worker profiles and BLS QCEW (details.js, written by fetch_context.py) ---------- */
+let CTX2=window.CTX2||null,DETP=null;
+function loadDetails(){if(CTX2)return Promise.resolve(CTX2);if(!DETP)DETP=loadScript("details.js").then(()=>CTX2=window.CTX2||null);return DETP;}
+const LGROUPS=[["Age",[["CA01","29 or younger"],["CA02","30 to 54"],["CA03","55 or older"]]],
+ ["Monthly earnings",[["CE01","$1,250 or less"],["CE02","$1,251 to $3,333"],["CE03","More than $3,333"]]],
+ ["Race",[["CR01","White"],["CR02","Black"],["CR03","American Indian or Alaska Native"],["CR04","Asian"],["CR05","Native Hawaiian or Pacific Islander"],["CR07","Two or more races"]]],
+ ["Ethnicity",[["CT01","Not Hispanic or Latino"],["CT02","Hispanic or Latino"]]],
+ ["Education (age 30+)",[["CD01","Less than high school"],["CD02","High school or equivalent"],["CD03","Some college or associate"],["CD04","Bachelor’s or higher"]]],
+ ["Sex",[["CS01","Men"],["CS02","Women"]]]];
+function lodesVec(kind,geo){const L=CTX2?.lodesW;if(!L)return null;const v=isC(geo)?L[kind]?.[geo]:L[kind+"S"]?.[geo];if(!v)return null;const o={};L.cols.forEach((c,i)=>o[c]=v[i]);return o;}
+function lodesPanel(geo){
+  const w=lodesVec("wac",geo),r=lodesVec("rac",geo);if(!w&&!r)return "";
+  const grp=([title,items])=>{const tw=items.reduce((a,[k])=>a+(w?.[k]||0),0),tr=items.reduce((a,[k])=>a+(r?.[k]||0),0);
+    return `<div class="panel"><h3>${title}</h3><div style="display:flex;gap:14px;font-size:12px;color:var(--muted);margin:6px 0"><span><i style="display:inline-block;width:12px;height:8px;background:var(--c4);border-radius:2px"></i> work here</span><span><i style="display:inline-block;width:12px;height:8px;background:var(--c2);border-radius:2px"></i> live here</span></div>
+    ${items.map(([k,l])=>{const a=w&&tw?w[k]/tw:null,b=r&&tr?r[k]/tr:null;return `<div class="demo-row" style="grid-template-columns:minmax(110px,1.3fr) 2fr auto"><span>${l}</span><div style="display:grid;gap:3px"><div class="bar"><b style="width:${a!=null?100*a:0}%"></b></div><div class="bar"><b style="width:${b!=null?100*b:0}%;background:var(--c2)"></b></div></div><span class="num"><b>${show(fPct(a))}</b> · ${show(fPct(b))}</span></div>`;}).join("")}</div>`;};
+  return `<div class="section" id="lodesw"><div class="sec-head"><h2>Who works here vs. who lives here</h2><p>LEHD Origin-Destination Employment Statistics (OnTheMap), ${CTX2.lodesW.year} · all jobs, including public sector</p></div>
+   <div class="kpis"><div class="kpi"><div class="lab">Jobs located here</div><div class="val">${show(fInt(w?.C000))}</div></div><div class="kpi"><div class="lab">Employed residents</div><div class="val">${show(fInt(r?.C000))}</div><div class="meta"><span>jobs held by people living here</span></div></div></div>
+   <div class="demo-grid" style="margin-top:14px">${LGROUPS.map(grp).join("")}</div></div>`;
+}
+function qcewPanel(geo){
+  const Q=CTX2?.qcew;if(!Q)return "";const d=isC(geo)?Q.counties?.[geo]:Q.states?.[geo];if(!d)return "";
+  const rows=[["10","All private industries"],...SECTORS.map(([c,n])=>[c,n])].filter(([c])=>d[c]).map(([c,n])=>({c,n,e:d[c][0],j:d[c][1],p:d[c][2]}));
+  return `<div class="section" id="qcew"><div class="sec-head"><h2>Employers and pay by industry</h2><p>BLS Quarterly Census of Employment and Wages, ${Q.year} annual averages · private sector</p></div>
+   ${sortTable(rows,[["n","Industry",null],["e","Employers",fInt],["j","Jobs",fInt],["p","Average annual pay",fMoney]],"j",r=>r.c==="10"?`<b>${esc(r.n)}</b>`:`<a href="${geoHref(geo,r.c)}">${esc(r.n)}</a> <span class="code">${r.c}</span>`,"qcew"+geo)}
+   <p style="font-size:12px;color:var(--muted);margin:0">QCEW counts jobs covered by unemployment insurance, so its totals differ slightly from QWI. “—” means BLS withheld the value to protect employers’ privacy.</p></div>`;
+}
+function addDetailSections(geo,h){
+  loadDetails().then(()=>{if(location.hash!==h||!CTX2)return;const anchor=document.getElementById("people")||document.getElementById("demo");if(!anchor)return;
+    anchor.insertAdjacentHTML("afterend",lodesPanel(geo)+qcewPanel(geo));});
 }
 
 /* ---------- Views ---------- */
@@ -1304,7 +1492,15 @@ function renderDemo(d,s,i){
    <div class="panel"><h3>By sex</h3><div style="display:flex;gap:16px;align-items:baseline;margin:8px 0 6px"><span class="big-gap">${gap==null?"—":fPct(Math.abs(gap))}</span><span style="color:var(--muted);font-size:14px">${gap==null?"pay gap not published":gap>=0?"less paid to women than men":"more paid to women than men"}</span></div>${sexRow("Men",m,st)}${sexRow("Women",w,st)}
      <details style="margin-top:10px"><summary style="cursor:pointer;font-size:14px">Pay gap by age</summary><div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Age</th><th>Men</th><th>Women</th><th>Gap</th></tr></thead><tbody>${wAge}</tbody></table></div></details></div>
    <div class="panel"><h3>By education</h3><p class="note" style="margin:8px 0">Workers 25 and older. ${e2&&e4?`A bachelor’s degree earns <b>${fPct(e4/e2-1)}</b> more than a high school diploma.`:""}</p>${eduRows}<p style="font-size:12px;color:var(--muted);margin:8px 0 0">Under-25 workers: ${show(fCompact(ge("E5","0").Emp)||null)} jobs (education not tracked).</p></div>
+   ${raceEthPanel(d)}
   </div>`;
+}
+function raceEthPanel(d){
+  const r=k=>d.rh?.[k]||{};const all=r("A0|A0").Emp;
+  if(!d.rh||!Object.keys(d.rh).length)return "";
+  const rows=list=>{const mx=Math.max(1,...list.map(([k])=>r(k).Emp||0));return list.map(([k,l])=>{const o=r(k);return `<div class="demo-row"><span>${l}</span><div class="bar"><b style="width:${o.Emp?100*o.Emp/mx:0}%"></b></div><span class="num"><b>${show(o.Emp!=null&&all?fPct(o.Emp/all):null)}</b> · ${show(fMoney(o.EarnS))}</span></div>`;}).join("");};
+  return `<div class="panel"><h3>By race and ethnicity</h3><p class="note" style="margin:8px 0">Share of jobs · ${term("monthly earnings","earn")}. Race groups include people of any ethnicity.</p>
+   ${rows(RACES.map(([k,l])=>[k+"|A0",l]))}<div style="height:8px"></div>${rows(ETHS.map(([k,l])=>["A0|"+k,l]))}</div>`;
 }
 function viewIndustryInner(i){
   const m=S.indMetric;
@@ -1374,6 +1570,9 @@ function viewAbout(){
    <li><b>Population, income and commuting</b>: <a href="https://www.census.gov/programs-surveys/acs" target="_blank" rel="noopener">Census American Community Survey</a> 1-year estimates. These are survey estimates with margins of error.</li>
    <li><b>Cost of living</b>: <a href="https://www.bea.gov/data/prices-inflation/regional-price-parities-state-and-metro-area" target="_blank" rel="noopener">BEA Regional Price Parities</a>, yearly. “Pay adjusted for prices” divides QWI earnings by this index.</li>
    <li><b>Commuting flows</b>: <a href="https://lehd.ces.census.gov/data/#lodes" target="_blank" rel="noopener">LEHD Origin-Destination Employment Statistics</a>, the data behind <a href="https://onthemap.ces.census.gov/" target="_blank" rel="noopener">OnTheMap</a>. Counts all jobs, including public sector.</li>
+   <li><b>People who live here</b>: Census ACS tables B01001 (age by sex), B03002 (race and Hispanic origin), B15003 (education), B17001 (poverty) and C24010 (occupation), 1-year for states and 5-year for counties, loaded live with a Census key.</li>
+   <li><b>Workers by race and ethnicity</b>: QWI race-by-ethnicity tables. Race groups include people of any ethnicity.</li>
+   <li><b>Who works here vs. who lives here</b>: LEHD LODES workplace (WAC) and residence (RAC) files, summed from blocks to counties. <b>Employers and pay</b>: <a href="https://www.bls.gov/cew/" target="_blank" rel="noopener">BLS QCEW</a> annual averages, private sector. Both come from the saved file details.js.</li>
    <li>Each number is labeled with its own month, year or quarter; the quarter menu only changes the QWI numbers.</li>
    <li>Loaded now: ${Object.keys(CTX_SRC).map(g=>`${CTX_SRC[g]} ${CTX[g]?"✓ ("+ctxLabel(g)+")":"✗"}`).join(" · ")}${CTX.fetched?` · context file from ${esc(CTX.fetched)}`:""}</li>
   </ul></div>
