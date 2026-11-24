@@ -995,6 +995,10 @@ const DLO={geo:"states",states:[],cstate:"06",tables:["B01003","B19013"],survey:
 // survey years available: 1-year from 2005 (no standard 2020 release), 5-year from 2009 (2005–2009)
 function acsYears(ds){const last=ds==="acs5"?ACS5_YEAR:CTX.acs?.year;if(!last)return[];const ys=[];for(let y=last;y>=(ds==="acs5"?2009:2005);y--)if(!(ds==="acs1"&&y===2020))ys.push(y);return ys;}
 const acsDs=()=>DLO.geo==="counties"?"acs5":DLO.survey;
+// LEHD and QCEW: newest year lives in details.js, older years in details/<kind>_<year>.js
+const detKind=()=>DL.ds==="lehd"?"lodes":"qcew";
+function detYears(kind){const cur=kind==="lodes"?CTX2?.lodesW?.year:CTX2?.qcew?.year;if(!cur)return[];return [...new Set([cur,...(CTX2.hist?.[kind]||[])])].sort((a,b)=>b-a);}
+async function detData(kind,y){const cur=kind==="lodes"?CTX2?.lodesW:CTX2?.qcew;if(cur&&cur.year===y)return cur;const k=kind+"_"+y;if(!window.CTX2H?.[k])await loadScript(`details/${k}.js`);return window.CTX2H?.[k]||null;}
 function dsPicker(){return `<fieldset style="grid-column:1/-1"><legend>Data</legend><div class="row">${DSRC.map(([k,l])=>`<label class="opt"><input type="radio" name="ds" value="${k}"${(DL.ds||"qwi")===k?" checked":""}> <span>${l}</span></label>`).join("")}</div></fieldset>`;}
 function dlOtherGeos(){
   if(DLO.geo==="counties")return countiesOf(DLO.cstate);
@@ -1022,25 +1026,28 @@ async function dlOtherRun(onStep){
     if(missing.length)DLO.missing=missing;else delete DLO.missing;
   }else{
     await loadDetails();if(!CTX2)throw new Error("This data comes from the saved file details.js, which isn’t here yet. Run get_context_data.bat (or the GitHub data run) to create it.");
-    const geos=dlOtherGeos();
+    const geos=dlOtherGeos();const kind=detKind(),avail=detYears(kind);
+    const lo=+(DLO.dfrom||avail[0]),hi=+(DLO.dto||avail[0]),years=avail.filter(y=>y>=Math.min(lo,hi)&&y<=Math.max(lo,hi)).sort();
+    const sets=[];let n=0;for(const y of years){const d=await detData(kind,y);n++;onStep(n,years.length);if(d)sets.push(d);}
+    if(DLO.geo==="counties"){await loadCountyNames();const st=DLO.cstate;const ks=new Set(geos);sets.forEach(d=>Object.keys(kind==="lodes"?{...d.wac,...d.rac}:d.counties||{}).forEach(g=>{if(g.startsWith(st))ks.add(g);}));geos.splice(0,geos.length,...[...ks].sort());}
     if(ds==="lehd"){
-      const L=CTX2.lodesW;if(!L)throw new Error("details.js has no LEHD worker profiles.");
+      if(!sets.length)throw new Error("details.js has no LEHD worker profiles.");
       const lab=Object.fromEntries([["C000","All jobs"],...LGROUPS.flatMap(([t,items])=>items.map(([k,l])=>[k,t+": "+l])),...Array.from({length:20},(_,i)=>["CNS"+String(i+1).padStart(2,"0"),"Industry: "+(SECTORS[i]?.[1]||"NAICS sector "+(i+1))])]);
-      geos.forEach(g=>[["wac","Jobs located here"],["rac","Jobs held by residents"]].forEach(([k,w])=>{const v=isC(g)?L[k]?.[g]:L[k+"S"]?.[g];if(!v)return;
-        L.cols.forEach((c,i)=>recs.push({fips:g,place:geoFull(g),counted_by:w,column:c,measure:lab[c]||c,jobs:v[i],year:L.year}));}));
-      cols=["fips","place","counted_by","column","measure","jobs","year"];
+      sets.forEach(L=>geos.forEach(g=>[["wac","Jobs located here"],["rac","Jobs held by residents"]].forEach(([k,w])=>{const v=isC(g)?L[k]?.[g]:L[k+"S"]?.[g];if(!v)return;
+        L.cols.forEach((c,i)=>recs.push({year:L.year,fips:g,place:geoFull(g),counted_by:w,column:c,measure:lab[c]||c,jobs:v[i]}));})));
+      cols=["year","fips","place","counted_by","column","measure","jobs"];
     }else{
-      const Q=CTX2.qcew;if(!Q)throw new Error("details.js has no BLS QCEW data.");
-      geos.forEach(g=>{const d=isC(g)?Q.counties?.[g]:Q.states?.[g];if(!d)return;
-        [["10","All private industries"],...SECTORS.map(([c,n])=>[c,n])].forEach(([c,n])=>{if(!d[c])return;recs.push({fips:g,place:geoFull(g),naics:c,industry:n,employers:d[c][0],jobs:d[c][1],avg_annual_pay:d[c][2],year:Q.year});});});
-      cols=["fips","place","naics","industry","employers","jobs","avg_annual_pay","year"];
+      if(!sets.length)throw new Error("details.js has no BLS QCEW data.");
+      sets.forEach(Q=>geos.forEach(g=>{const d=isC(g)?Q.counties?.[g]:Q.states?.[g];if(!d)return;
+        [["10","All private industries"],...SECTORS.map(([c,n])=>[c,n])].forEach(([c,n])=>{if(!d[c])return;recs.push({year:Q.year,fips:g,place:geoFull(g),naics:c,industry:n,employers:d[c][0],jobs:d[c][1],avg_annual_pay:d[c][2]});});}));
+      cols=["year","fips","place","naics","industry","employers","jobs","avg_annual_pay"];
     }
-    onStep(1,1);
   }
   return {cols,recs};
 }
 function csvPlain(res){const q=v=>v==null?"":typeof v==="number"?v:/[",\n]/.test(v)?`"${String(v).replace(/"/g,'""')}"`:v;return [res.cols.join(","),...res.recs.map(r=>res.cols.map(c=>q(r[c])).join(","))].join("\n");}
 function viewDownloadOther(){
+  if(DL.ds!=="acs"&&!CTX2)loadDetails().then(()=>{if(location.hash==="#download"&&CTX2)viewDownloadOther();});
   const ck=(name,val,cur,label)=>`<label class="opt"><input type="radio" name="${name}" value="${val}"${cur===val?" checked":""}> <span>${label}</span></label>`;
   const ds=DL.ds,needKey=ds==="acs"&&!KEY;
   V.innerHTML=`<h1>Download data</h1><p class="lede">${ds==="acs"?"Population tables from the Census American Community Survey, with margins of error. One row per place and table line.":ds==="lehd"?"Jobs by worker age, earnings, industry, race, ethnicity, education and sex, counted where people work and where they live (LEHD, the data behind OnTheMap).":"Private-sector employers, jobs and average annual pay by industry (BLS Quarterly Census of Employment and Wages, annual averages)."}</p>
@@ -1059,14 +1066,17 @@ function viewDownloadOther(){
     ${(()=>{const ys=acsYears(acsDs());const lab=y=>acsDs()==="acs5"?`${y-4}–${y}`:String(y);const f=DLO.from||ys[0],t=DLO.to||ys[0];
       return `<div class="row" style="margin-top:8px"><label class="sel">From<select id="afrom">${ys.map(y=>`<option value="${y}"${String(y)===String(f)?" selected":""}>${lab(y)}</option>`).join("")}</select></label><label class="sel">To<select id="ato">${ys.map(y=>`<option value="${y}"${String(y)===String(t)?" selected":""}>${lab(y)}</option>`).join("")}</select></label></div>`;})()}
     <small style="color:var(--muted)">${acsDs()==="acs1"?"No standard 1-year release for 2020. ":""}Some tables start later (education detail in 2012). Compare overlapping 5-year periods with care.</small>
-   </fieldset>`:""}
+   </fieldset>`:(()=>{const ys=detYears(detKind());if(!ys.length)return `<fieldset><legend>Time</legend><p class="note" style="margin:0">${CTX2?"Only the newest year is saved so far.":"Loading saved data…"}</p></fieldset>`;
+     const f=DLO.dfrom||ys[0],t=DLO.dto||ys[0];const opt=v=>ys.map(y=>`<option value="${y}"${String(y)===String(v)?" selected":""}>${y}</option>`).join("");
+     return `<fieldset><legend>Time</legend><div class="row"><label class="sel">From<select id="dfrom">${opt(f)}</select></label><label class="sel">To<select id="dto">${opt(t)}</select></label></div>
+      <small style="color:var(--muted)">${ys.length} saved year${ys.length>1?"s":""}: ${ys[ys.length-1]}–${ys[0]}. ${DL.ds==="lehd"?"Race, ethnicity, education and sex start in 2009.":"Annual averages; private sector."}</small></fieldset>`;})()}
   </form>
   <div class="section panel">${ds==="acs"?(()=>{const ys=acsYears(acsDs());const lo=+(DLO.from||ys[0]),hi=+(DLO.to||ys[0]);const n=ys.filter(y=>y>=Math.min(lo,hi)&&y<=Math.max(lo,hi)).length*DLO.tables.length;return `<p style="margin:0 0 10px">This needs <b>${n}</b> request${n===1?"":"s"} to the Census API.</p>`;})():""}<div class="row"><button class="btn" type="button" id="dlgo"${needKey||(ds==="acs"&&!DLO.tables.length)||(DLO.geo==="some"&&!DLO.states.length)?" disabled":""}>Prepare download</button><span id="dlmsg" style="color:var(--muted);font-size:14px"></span></div><div id="dlout"></div></div>`;
   const f=document.getElementById("dlf");
   f.onchange=e=>{const t=e.target;
-    if(t.name==="ds"){DL.ds=t.value;return viewDownload();}
+    if(t.name==="ds"){DL.ds=t.value;DLO.dfrom=DLO.dto=null;return viewDownload();}
     if(t.name==="geo"||t.name==="srv"){DLO.from=DLO.to=null;}
-    if(t.name==="srv")DLO.survey=t.value;else if(t.id==="afrom")DLO.from=t.value;else if(t.id==="ato")DLO.to=t.value;
+    if(t.name==="srv")DLO.survey=t.value;else if(t.id==="afrom")DLO.from=t.value;else if(t.id==="ato")DLO.to=t.value;else if(t.id==="dfrom")DLO.dfrom=t.value;else if(t.id==="dto")DLO.dto=t.value;
     if(t.name==="geo")DLO.geo=t.value;else if(t.name==="tbl")DLO.tables=[...f.querySelectorAll('input[name="tbl"]:checked')].map(x=>x.value);
     else if(t.id==="dls")DLO.states=[...t.selectedOptions].map(o=>o.value);else if(t.id==="dlc")DLO.cstate=t.value;
     viewDownloadOther();};

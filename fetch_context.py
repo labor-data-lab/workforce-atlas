@@ -391,30 +391,21 @@ QCEW_IND = ["10", "11", "21", "22", "23", "31-33", "42", "44-45", "48-49", "51",
             "61", "62", "71", "72", "81"]
 
 
-def fetch_qcew(contact):
-    """Private-sector establishments, jobs and average annual pay by county and state, annual averages."""
+def qcew_ua(contact):
     ua = dict(UA)
     if contact:
         ua["User-Agent"] = f"WorkforceAtlas/1.0 (contact: {contact})"
-    def csv_rows(url):
-        req = urllib.request.Request(url, headers=ua)
-        with urllib.request.urlopen(req, timeout=300) as r:
-            return list(csv.DictReader(io.TextIOWrapper(r, encoding="utf-8")))
-    year = None
-    for y in range(dt.date.today().year - 1, dt.date.today().year - 4, -1):
-        try:
-            rows10 = csv_rows(f"https://data.bls.gov/cew/data/api/{y}/a/industry/10.csv")
-            if rows10:
-                year = y
-                break
-        except urllib.error.HTTPError as e:
-            if e.code == 403:
-                print("QCEW: BLS refused the download. Add --contact you@example.com (BLS asks scripts to identify themselves).")
-                return None
-            continue
-    if not year:
-        print("QCEW: no annual data found")
-        return None
+    return ua
+
+
+def qcew_csv(url, ua):
+    req = urllib.request.Request(url, headers=ua)
+    with urllib.request.urlopen(req, timeout=300) as r:
+        return list(csv.DictReader(io.TextIOWrapper(r, encoding="utf-8")))
+
+
+def qcew_year(year, ua, rows10=None):
+    """Private-sector establishments, jobs and average annual pay for one year, by county and state."""
     counties, states = {}, {}
     def take(rows, code):
         for r in rows:
@@ -428,15 +419,81 @@ def fetch_qcew(contact):
             else:
                 vals = [num(r.get("annual_avg_estabs")), num(r.get("annual_avg_emplvl")), num(r.get("avg_annual_pay"))]
             (states if a.endswith("000") else counties).setdefault(a[:2] if a.endswith("000") else a, {})[code] = vals
-    take(rows10, "10")
+    take(rows10 if rows10 is not None else qcew_csv(f"https://data.bls.gov/cew/data/api/{year}/a/industry/10.csv", ua), "10")
     for code in QCEW_IND[1:]:
         try:
-            take(csv_rows(f"https://data.bls.gov/cew/data/api/{year}/a/industry/{code.replace('-', '_')}.csv"), code)
+            take(qcew_csv(f"https://data.bls.gov/cew/data/api/{year}/a/industry/{code.replace('-', '_')}.csv", ua), code)
         except Exception as e:
-            print(f"  QCEW {code}: skipped ({e})")
-    DETAILS["qcew"] = {"year": year, "cols": ["estabs", "jobs", "avgPay"], "counties": counties, "states": states}
-    print(f"QCEW {year}: {len(counties)} counties, {len(states)} states")
-    return {"year": year}
+            print(f"  QCEW {year} {code}: skipped ({e})")
+    return {"year": year, "cols": ["estabs", "jobs", "avgPay"], "counties": counties, "states": states}
+
+
+def fetch_qcew(contact):
+    """Newest annual QCEW year, kept in details.js."""
+    ua = qcew_ua(contact)
+    for y in range(dt.date.today().year - 1, dt.date.today().year - 4, -1):
+        try:
+            rows10 = qcew_csv(f"https://data.bls.gov/cew/data/api/{y}/a/industry/10.csv", ua)
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                print("QCEW: BLS refused the download. Add --contact you@example.com (BLS asks scripts to identify themselves).")
+                return None
+            continue
+        if rows10:
+            d = qcew_year(y, ua, rows10)
+            DETAILS["qcew"] = d
+            print(f"QCEW {y}: {len(d['counties'])} counties, {len(d['states'])} states")
+            return {"year": y}
+    print("QCEW: no annual data found")
+    return None
+
+
+def lodes_profile_year(year):
+    """Worker profiles by county (work place and home) for one year; used for history files."""
+    wac, rac = {}, {}
+    for f, ab in STATES.items():
+        for kind, col, into in (("wac", "w_geocode", wac), ("rac", "h_geocode", rac)):
+            try:
+                lodes_profile(gz_csv(f"{LODES}{ab}/{kind}/{ab}_{kind}_S000_JT00_{year}.csv.gz"), col, into)
+            except Exception as e:
+                print(f"  LODES {year} {ab} {kind}: skipped ({e})")
+    sum_by_state = lambda d: {f: [sum(v[i] for g, v in d.items() if g[:2] == f) for i in range(len(LCOLS))] for f in STATES if any(g[:2] == f for g in d)}
+    return {"year": year, "cols": LCOLS, "wac": wac, "rac": rac, "wacS": sum_by_state(wac), "racS": sum_by_state(rac)}
+
+
+HIST_YEARS = 10  # past years of LEHD profiles and QCEW kept as details/<kind>_<year>.js
+
+
+def write_detail_history(here, contact):
+    """Save older years once; later runs only add years that are missing."""
+    hdir = os.path.join(here, "details")
+    os.makedirs(hdir, exist_ok=True)
+    def save(kind, data):
+        with open(os.path.join(hdir, f"{kind}_{data['year']}.js"), "w", encoding="utf-8") as fh:
+            fh.write(f"(window.CTX2H=window.CTX2H||{{}})['{kind}_{data['year']}']=" + json.dumps(data, separators=(",", ":")) + ";\n")
+    have = lambda kind, y: os.path.exists(os.path.join(hdir, f"{kind}_{y}.js"))
+    if "lodesW" in DETAILS:
+        last = DETAILS["lodesW"]["year"]
+        for y in range(last - 1, last - HIST_YEARS, -1):
+            if not have("lodes", y):
+                print(f"LODES history {y}...")
+                d = lodes_profile_year(y)
+                if d["wac"]:
+                    save("lodes", d)  # years with no published files are skipped
+    if "qcew" in DETAILS:
+        last, ua = DETAILS["qcew"]["year"], qcew_ua(contact)
+        for y in range(last - 1, last - HIST_YEARS, -1):
+            if not have("qcew", y):
+                print(f"QCEW history {y}...")
+                try:
+                    d = qcew_year(y, ua)
+                    if d["counties"]:
+                        save("qcew", d)
+                except Exception as e:
+                    print(f"  QCEW {y}: skipped ({e})")
+    years = lambda kind: sorted(int(n.split("_")[1][:4]) for n in os.listdir(hdir) if n.startswith(kind + "_"))
+    DETAILS["hist"] = {"lodes": years("lodes"), "qcew": years("qcew")}
+    print("Detail history:", DETAILS["hist"])
 
 
 def main():
@@ -469,6 +526,10 @@ def main():
     with open(out, "w", encoding="utf-8") as fh:
         fh.write("window.CTX=" + json.dumps(ctx, separators=(",", ":")) + ";\n")
     print("Saved", out, "with:", ", ".join(k for k in ctx if k != "fetched") or "nothing")
+    try:
+        write_detail_history(os.path.dirname(os.path.abspath(__file__)), a.contact)
+    except Exception as e:
+        print("Detail history failed:", e)
     det = os.path.join(os.path.dirname(os.path.abspath(__file__)), "details.js")
     with open(det, "w", encoding="utf-8") as fh:
         fh.write("window.CTX2=" + json.dumps(dict(DETAILS, fetched=ctx["fetched"]), separators=(",", ":")) + ";\n")
