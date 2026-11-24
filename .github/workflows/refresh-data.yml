@@ -82,7 +82,7 @@ jobs:
         run: |
           git config user.name "workforce-atlas-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add data.js context.js details.js counties history
+          git add data.js context.js details.js details counties history
           if git diff --cached --quiet; then echo "No changes"; else git commit -m "Refresh data $(date +%Y-%m-%d)" && git push; fi
 
   # Build the site package in its own job; a separate job publishes it (avoids GitHub's "No artifacts named github-pages" race)
@@ -101,6 +101,7 @@ jobs:
           for f in data.js context.js details.js; do [ -f "$f" ] && cp "$f" _site/ || true; done
           [ -d counties ] && cp -r counties _site/ || true
           [ -d history ] && cp -r history _site/ || true
+          [ -d details ] && cp -r details _site/ || true
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:
@@ -108,6 +109,7 @@ jobs:
 
   deploy:
     needs: build
+    # without this line GitHub skips deploy whenever refresh was skipped (every upload)
     if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     environment:
