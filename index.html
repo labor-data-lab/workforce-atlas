@@ -990,8 +990,8 @@ function csvOf(res){const q=(v,c)=>v==null?"":typeof v==="number"?(c==="TurnOvrS
   const head=res.cols.map(c=>{const l=DLV.find(x=>x[0]===c)?.[1];return l?(DL.period==="year"?l.replace(" (beginning of quarter)","")+(DL.sumFlows&&["HirA","Sep","FrmJbC"].includes(c)?" (yearly total)":" (yearly average)"):l):c;});return [head.join(","),...res.recs.map(r=>res.cols.map(c=>q(r[c],c)).join(","))].join("\n");}
 /* ---------- Download: other sources (Census ACS live; LEHD and BLS QCEW from details.js) ---------- */
 const DSRC=[["qwi","Jobs and pay (Census QWI)"],["acs","People who live here (Census ACS)"],["lehd","Workers by where they work and live (LEHD)"],["qcew","Employers and pay by industry (BLS QCEW)"]];
-const ACST=[["B01001","Age by sex"],["B03002","Race and Hispanic origin"],["B15003","Education, adults 25+"],["B17001","Poverty status"],["C24010","Occupation by sex"],["B20002","Median earnings by sex"],["B19013","Median household income"]];
-const DLO={geo:"states",states:[],cstate:"06",tables:["B01001","B03002","B15003"],res:null};
+const ACST=[["B01003","Total population"],["B19013","Median household income"],["B01001","Age by sex"],["B03002","Race and Hispanic origin"],["B15003","Education, adults 25+"],["B17001","Poverty status"],["C24010","Occupation by sex"],["B20002","Median earnings by sex"],["B19301","Income per person"]];
+const DLO={geo:"states",states:[],cstate:"06",tables:["B01003","B19013"],res:null};
 function dsPicker(){return `<fieldset style="grid-column:1/-1"><legend>Data</legend><div class="row">${DSRC.map(([k,l])=>`<label class="opt"><input type="radio" name="ds" value="${k}"${(DL.ds||"qwi")===k?" checked":""}> <span>${l}</span></label>`).join("")}</div></fieldset>`;}
 function dlOtherGeos(){
   if(DLO.geo==="counties")return countiesOf(DLO.cstate);
