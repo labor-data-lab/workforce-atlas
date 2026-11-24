@@ -39,6 +39,7 @@ jobs:
       CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
       BEA_API_KEY: ${{ secrets.BEA_API_KEY }}
       BLS_API_KEY: ${{ secrets.BLS_API_KEY }}
+      BLS_CONTACT: ${{ secrets.BLS_CONTACT }}   # optional: your email, which BLS asks scripts to send
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -80,7 +81,7 @@ jobs:
         run: |
           git config user.name "workforce-atlas-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add data.js context.js counties history
+          git add data.js context.js details.js counties history
           if git diff --cached --quiet; then echo "No changes"; else git commit -m "Refresh data $(date +%Y-%m-%d)" && git push; fi
 
   deploy:
@@ -98,7 +99,7 @@ jobs:
         run: |
           mkdir _site
           cp index.html _site/
-          for f in data.js context.js; do [ -f "$f" ] && cp "$f" _site/ || true; done
+          for f in data.js context.js details.js; do [ -f "$f" ] && cp "$f" _site/ || true; done
           [ -d counties ] && cp -r counties _site/ || true
           [ -d history ] && cp -r history _site/ || true
       - uses: actions/configure-pages@v5
