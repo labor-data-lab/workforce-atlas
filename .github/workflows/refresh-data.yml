@@ -25,6 +25,7 @@ permissions:
   contents: write
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: pages
@@ -84,13 +85,11 @@ jobs:
           git add data.js context.js details.js counties history
           if git diff --cached --quiet; then echo "No changes"; else git commit -m "Refresh data $(date +%Y-%m-%d)" && git push; fi
 
-  deploy:
+  # Build the site package in its own job; a separate job publishes it (avoids GitHub's "No artifacts named github-pages" race)
+  build:
     needs: refresh
     if: always() && (needs.refresh.result == 'success' || needs.refresh.result == 'skipped')
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,8 +102,28 @@ jobs:
           [ -d counties ] && cp -r counties _site/ || true
           [ -d history ] && cp -r history _site/ || true
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Wait until GitHub lists the site package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 30); do
+            n=$(curl -s -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?name=github-pages" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('total_count',0))")
+            if [ "$n" -ge 1 ]; then echo "Site package is ready"; exit 0; fi
+            echo "Waiting for the site package ($i/30)..."; sleep 10
+          done
+          echo "Site package still not listed; trying to publish anyway"
       - id: deployment
         uses: actions/deploy-pages@v4
