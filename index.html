@@ -991,7 +991,10 @@ function csvOf(res){const q=(v,c)=>v==null?"":typeof v==="number"?(c==="TurnOvrS
 /* ---------- Download: other sources (Census ACS live; LEHD and BLS QCEW from details.js) ---------- */
 const DSRC=[["qwi","Jobs and pay (Census QWI)"],["acs","People who live here (Census ACS)"],["lehd","Workers by where they work and live (LEHD)"],["qcew","Employers and pay by industry (BLS QCEW)"]];
 const ACST=[["B01003","Total population"],["B19013","Median household income"],["B01001","Age by sex"],["B03002","Race and Hispanic origin"],["B15003","Education, adults 25+"],["B17001","Poverty status"],["C24010","Occupation by sex"],["B20002","Median earnings by sex"],["B19301","Income per person"]];
-const DLO={geo:"states",states:[],cstate:"06",tables:["B01003","B19013"],res:null};
+const DLO={geo:"states",states:[],cstate:"06",tables:["B01003","B19013"],survey:"acs1",from:null,to:null,res:null};
+// survey years available: 1-year from 2005 (no standard 2020 release), 5-year from 2009 (2005–2009)
+function acsYears(ds){const last=ds==="acs5"?ACS5_YEAR:CTX.acs?.year;if(!last)return[];const ys=[];for(let y=last;y>=(ds==="acs5"?2009:2005);y--)if(!(ds==="acs1"&&y===2020))ys.push(y);return ys;}
+const acsDs=()=>DLO.geo==="counties"?"acs5":DLO.survey;
 function dsPicker(){return `<fieldset style="grid-column:1/-1"><legend>Data</legend><div class="row">${DSRC.map(([k,l])=>`<label class="opt"><input type="radio" name="ds" value="${k}"${(DL.ds||"qwi")===k?" checked":""}> <span>${l}</span></label>`).join("")}</div></fieldset>`;}
 function dlOtherGeos(){
   if(DLO.geo==="counties")return countiesOf(DLO.cstate);
@@ -1000,20 +1003,23 @@ function dlOtherGeos(){
 async function dlOtherRun(onStep){
   const ds=DL.ds,recs=[];let cols;
   if(ds==="acs"){
-    const c=DLO.geo==="counties",d=c?"acs5":"acs1",y=c?ACS5_YEAR:CTX.acs?.year;
-    if(!y)throw new Error("The Census survey year isn’t loaded yet. Reload the page and try again.");
+    const c=DLO.geo==="counties",d=acsDs(),avail=acsYears(d);
+    if(!avail.length)throw new Error("The Census survey year isn’t loaded yet. Reload the page and try again.");
+    const lo=+(DLO.from||avail[0]),hi=+(DLO.to||avail[0]),years=avail.filter(y=>y>=Math.min(lo,hi)&&y<=Math.max(lo,hi)).sort();
     if(c)await loadCountyNames();
-    const keep=new Set(dlOtherGeos());let n=0;
-    for(const g of DLO.tables){
+    const keep=new Set(dlOtherGeos());let n=0;const total=years.length*DLO.tables.length;const missing=[];
+    for(const y of years)for(const g of DLO.tables){
       const lab=await groupLabels(d,y,g);
       const t=await censusJSON(`https://api.census.gov/data/${y}/acs/${d}?get=group(${g})&for=${c?"county:*&in=state:"+DLO.cstate:"state:*"}`);
-      n++;onStep(n,DLO.tables.length);
-      if(!Array.isArray(t)||t.length<2)continue;const h=t[0];
+      n++;onStep(n,total);
+      if(!Array.isArray(t)||t.length<2){missing.push(g+" "+y);continue;}const h=t[0];
       t.slice(1).forEach(r=>{const o=Object.fromEntries(h.map((k,j)=>[k,r[j]]));const geo=c?o.state+o.county:o.state;if(!keep.has(geo))return;
         Object.keys(lab).sort().forEach(v=>{const e=num(o[v]),m=num(o[v.replace(/E$/,"M")]);
-          recs.push({fips:geo,place:c?geoFull(geo):ST[geo]?.n||geo,table:g,variable:v.replace(/E$/,""),category:labParts(lab[v]).join(" — ")||"Total",estimate:e!=null&&e>=0?e:null,moe:m!=null&&m>=0?m:null,survey:c?`ACS 5-year ${y-4}-${y}`:`ACS 1-year ${y}`});});});
+          recs.push({fips:geo,place:c?geoFull(geo):ST[geo]?.n||geo,table:g,variable:v.replace(/E$/,""),category:labParts(lab[v]).join(" — ")||"Total",estimate:e!=null&&e>=0?e:null,moe:m!=null&&m>=0?m:null,year:y,survey:d==="acs5"?`ACS 5-year ${y-4}-${y}`:`ACS 1-year ${y}`});});});
     }
-    cols=["fips","place","table","variable","category","estimate","moe","survey"];
+    cols=["year","fips","place","table","variable","category","estimate","moe","survey"];
+    recs.sort((a,b)=>a.fips.localeCompare(b.fips)||a.table.localeCompare(b.table)||a.year-b.year);
+    if(missing.length)DLO.missing=missing;else delete DLO.missing;
   }else{
     await loadDetails();if(!CTX2)throw new Error("This data comes from the saved file details.js, which isn’t here yet. Run get_context_data.bat (or the GitHub data run) to create it.");
     const geos=dlOtherGeos();
@@ -1047,19 +1053,27 @@ function viewDownloadOther(){
     ${DLO.geo==="counties"?`<select id="dlc" aria-label="State">${STATES.map(([f,,n])=>`<option value="${f}"${DLO.cstate===f?" selected":""}>${n}</option>`).join("")}</select>`:""}
    </fieldset>
    ${ds==="acs"?`<fieldset><legend>Tables</legend>${ACST.map(([k,l])=>`<label class="opt"><input type="checkbox" name="tbl" value="${k}"${DLO.tables.includes(k)?" checked":""}> <span>${l} <span class="code">${k}</span></span></label>`).join("")}
-     <small style="color:var(--muted)">States use the 1-year survey; counties use the 5-year survey, which covers every county.</small></fieldset>`:""}
+     </fieldset>
+   <fieldset><legend>Time</legend>
+    ${DLO.geo==="counties"?`<p style="margin:0 0 6px;font-size:14px">5-year survey (covers every county)</p>`:`${ck("srv","acs1",DLO.survey,"1-year survey (newest; states and large areas)")}${ck("srv","acs5",DLO.survey,"5-year survey (more precise)")}`}
+    ${(()=>{const ys=acsYears(acsDs());const lab=y=>acsDs()==="acs5"?`${y-4}–${y}`:String(y);const f=DLO.from||ys[0],t=DLO.to||ys[0];
+      return `<div class="row" style="margin-top:8px"><label class="sel">From<select id="afrom">${ys.map(y=>`<option value="${y}"${String(y)===String(f)?" selected":""}>${lab(y)}</option>`).join("")}</select></label><label class="sel">To<select id="ato">${ys.map(y=>`<option value="${y}"${String(y)===String(t)?" selected":""}>${lab(y)}</option>`).join("")}</select></label></div>`;})()}
+    <small style="color:var(--muted)">${acsDs()==="acs1"?"No standard 1-year release for 2020. ":""}Some tables start later (education detail in 2012). Compare overlapping 5-year periods with care.</small>
+   </fieldset>`:""}
   </form>
-  <div class="section panel"><div class="row"><button class="btn" type="button" id="dlgo"${needKey||(ds==="acs"&&!DLO.tables.length)||(DLO.geo==="some"&&!DLO.states.length)?" disabled":""}>Prepare download</button><span id="dlmsg" style="color:var(--muted);font-size:14px"></span></div><div id="dlout"></div></div>`;
+  <div class="section panel">${ds==="acs"?(()=>{const ys=acsYears(acsDs());const lo=+(DLO.from||ys[0]),hi=+(DLO.to||ys[0]);const n=ys.filter(y=>y>=Math.min(lo,hi)&&y<=Math.max(lo,hi)).length*DLO.tables.length;return `<p style="margin:0 0 10px">This needs <b>${n}</b> request${n===1?"":"s"} to the Census API.</p>`;})():""}<div class="row"><button class="btn" type="button" id="dlgo"${needKey||(ds==="acs"&&!DLO.tables.length)||(DLO.geo==="some"&&!DLO.states.length)?" disabled":""}>Prepare download</button><span id="dlmsg" style="color:var(--muted);font-size:14px"></span></div><div id="dlout"></div></div>`;
   const f=document.getElementById("dlf");
   f.onchange=e=>{const t=e.target;
     if(t.name==="ds"){DL.ds=t.value;return viewDownload();}
+    if(t.name==="geo"||t.name==="srv"){DLO.from=DLO.to=null;}
+    if(t.name==="srv")DLO.survey=t.value;else if(t.id==="afrom")DLO.from=t.value;else if(t.id==="ato")DLO.to=t.value;
     if(t.name==="geo")DLO.geo=t.value;else if(t.name==="tbl")DLO.tables=[...f.querySelectorAll('input[name="tbl"]:checked')].map(x=>x.value);
     else if(t.id==="dls")DLO.states=[...t.selectedOptions].map(o=>o.value);else if(t.id==="dlc")DLO.cstate=t.value;
     viewDownloadOther();};
   document.getElementById("dlgo").onclick=async()=>{const b=document.getElementById("dlgo"),m=document.getElementById("dlmsg");b.disabled=true;
     try{const res=await dlOtherRun((n,t)=>{m.textContent=`Preparing… ${n} of ${t}`;});m.textContent="";b.disabled=false;
       const prev=res.recs.slice(0,8);
-      document.getElementById("dlout").innerHTML=`<p style="margin:12px 0 6px"><b>${fInt(res.recs.length)}</b> rows ready.</p><div class="row"><button class="btn" type="button" id="dlcsv">Download CSV</button><span style="font-size:13px;color:var(--muted)">Blank cells are values the agency withholds or doesn’t publish.</span></div>
+      document.getElementById("dlout").innerHTML=`<p style="margin:12px 0 6px"><b>${fInt(res.recs.length)}</b> rows ready.${ds==="acs"&&DLO.missing?` <span style="color:var(--muted);font-size:13px">Not published: ${esc(DLO.missing.join(", "))}.</span>`:""}</p><div class="row"><button class="btn" type="button" id="dlcsv">Download CSV</button><span style="font-size:13px;color:var(--muted)">Blank cells are values the agency withholds or doesn’t publish.</span></div>
        ${prev.length?`<div class="tbl-wrap" style="margin-top:10px"><table><thead><tr>${res.cols.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${prev.map(r=>`<tr>${res.cols.map(c=>`<td>${r[c]==null?"":esc(r[c])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`:`<p class="note">No rows came back for these choices.</p>`}`;
       const c=document.getElementById("dlcsv");if(c)c.onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csvPlain(res)],{type:"text/csv"}));a.download=`workforce_atlas_${ds}_${DLO.geo==="counties"?"counties_"+DLO.cstate:DLO.geo}.csv`;document.body.appendChild(a);a.click();a.remove();};
     }catch(e){m.innerHTML=`<span class="err">${esc(e.message)}</span>`;b.disabled=false;}};
